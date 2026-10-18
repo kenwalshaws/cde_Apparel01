@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: review-pipeline
+Version: 0.1.0
+Summary: Review translate-and-summarize pipeline (proof of concept)
+License: Apache-2.0
+Requires-Python: >=3.12
+Requires-Dist: boto3==1.34.144
+Provides-Extra: local
+Requires-Dist: fastapi==0.111.1; extra == "local"
+Requires-Dist: uvicorn==0.30.3; extra == "local"
+Requires-Dist: pydantic==2.8.2; extra == "local"
+Provides-Extra: dev
+Requires-Dist: pytest==8.3.2; extra == "dev"

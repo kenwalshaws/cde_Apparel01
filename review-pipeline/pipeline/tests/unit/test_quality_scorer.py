@@ -1,0 +1,59 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Unit tests for the quality scorer. No AWS calls."""
+
+from src.config import load_config
+from src.service import quality_scorer
+
+
+CONFIG = load_config()
+
+
+def test_non_empty_translation_scores_high():
+    score = quality_scorer.score_translation("Bonjour le monde", "fr", "fr")
+    assert score == 1.0
+
+
+def test_empty_translation_scores_zero():
+    score = quality_scorer.score_translation("", "fr", "fr")
+    assert score == 0.0
+
+
+def test_language_mismatch_lowers_score():
+    matched = quality_scorer.score_translation("hello", "en", "en")
+    mismatched = quality_scorer.score_translation("hello", "en", "de")
+    assert matched > mismatched
+
+
+def test_missing_detection_is_neutral_not_zero():
+    score = quality_scorer.score_translation("some text", "fr", None)
+    assert 0.0 < score < 1.0
+
+
+def test_good_summary_scores_above_threshold():
+    summary = "The jacket fits well and the fabric feels soft. The buyer was very satisfied."
+    source = (
+        "The fit is spot on. The fabric feels soft and well made. "
+        "Very satisfied with this purchase overall and would buy again."
+    )
+    score = quality_scorer.score_summary(summary, source, CONFIG)
+    assert score >= CONFIG.quality_threshold
+
+
+def test_echoed_summary_scores_low():
+    source = "The fit is spot on. The fabric feels soft. Very satisfied."
+    # Summary identical to source -> no_echo = 0.
+    score = quality_scorer.score_summary(source, source, CONFIG)
+    assert score < CONFIG.quality_threshold
+
+
+def test_empty_summary_scores_zero():
+    score = quality_scorer.score_summary("", "some source text here", CONFIG)
+    assert score == 0.0
+
+
+def test_runaway_summary_penalized():
+    source = "Short source."
+    runaway = "This summary runs on and on. " * 40  # far over the max band
+    score = quality_scorer.score_summary(runaway, source, CONFIG)
+    assert score < CONFIG.quality_threshold

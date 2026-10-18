@@ -1,0 +1,5 @@
+# Internal engagement notes — do not publish
+cde_back_ground_folder/
+
+# OS cruft
+.DS_Store
