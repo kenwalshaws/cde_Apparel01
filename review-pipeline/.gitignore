@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Build artifacts
+build/
+pipeline.zip
+
+# Node / GUI
+gui/node_modules/
+gui/dist/
+
+# Generated pipeline outputs (results are reproducible from a run)
+data/outputs/
+
+# OS
+.DS_Store

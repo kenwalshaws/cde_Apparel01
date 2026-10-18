@@ -1,0 +1,51 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "review-pipeline"
+version = "0.1.0"
+description = "Review translate-and-summarize pipeline (proof of concept)"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+
+# Runtime dependency only. boto3 is also present in the AWS Lambda runtime, so
+# the deployment zip does not bundle it (see infrastructure/package_lambda.sh);
+# it is declared here for local runs and for completeness.
+dependencies = [
+    "boto3==1.34.144",
+]
+
+[project.optional-dependencies]
+# The local control plane that backs the GUI (not needed inside Lambda).
+local = [
+    "fastapi==0.111.1",
+    "uvicorn==0.30.3",
+    "pydantic==2.8.2",
+]
+# Test tooling.
+dev = [
+    "pytest==8.3.2",
+]
+
+# NOTE ON PACKAGE NAME: the importable package is `src` (imports read
+# `from src...` and the Lambda handler is `src.api.lambda_handler.handler`).
+# Keeping `src` as the import root avoids churn across the handler path, the
+# CloudFormation template, and the packaging script for this proof of concept.
+# A production hardening pass would rename it to a distribution-style package
+# (e.g. `review_pipeline`) — a deliberate, deferred decision.
+[tool.setuptools]
+packages = [
+    "src",
+    "src.api",
+    "src.client",
+    "src.model",
+    "src.service",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

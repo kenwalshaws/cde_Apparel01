@@ -1,0 +1,211 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Review translate-and-summarize pipeline (proof of concept). Deploys a Lambda that generates synthetic reviews, and translates/summarizes/scores them with Amazon Translate and Amazon Bedrock, writing results to an output bucket. The GUI drives it via explicit Lambda invokes; the S3 object-created trigger is optional and OFF by default.",
+  "Parameters": {
+    "ProjectName": {
+      "Type": "String",
+      "Default": "review-pipeline",
+      "Description": "Prefix for resource names."
+    },
+    "LambdaCodeS3Bucket": {
+      "Type": "String",
+      "Description": "S3 bucket holding the packaged Lambda deployment zip."
+    },
+    "LambdaCodeS3Key": {
+      "Type": "String",
+      "Default": "lambda/pipeline.zip",
+      "Description": "S3 key of the packaged Lambda deployment zip."
+    },
+    "BedrockModelId": {
+      "Type": "String",
+      "Default": "anthropic.claude-3-haiku-20240307-v1:0",
+      "Description": "Bedrock model id used for summarization."
+    },
+    "QualityThreshold": {
+      "Type": "String",
+      "Default": "0.7",
+      "Description": "Minimum per-step score for a result to be surfaced."
+    },
+    "EnableS3Trigger": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": ["true", "false"],
+      "Description": "When true, uploading a reviews JSON to the input bucket's sample/ prefix auto-triggers the pipeline Lambda. Default false: the GUI drives processing via explicit Lambda invokes. Flip to true once the GUI flow is proven."
+    }
+  },
+  "Conditions": {
+    "S3TriggerEnabled": {
+      "Fn::Equals": [{ "Ref": "EnableS3Trigger" }, "true"]
+    }
+  },
+  "Resources": {
+    "InputBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": { "Fn::Sub": "${ProjectName}-input-${AWS::AccountId}" },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            { "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" } }
+          ]
+        },
+        "NotificationConfiguration": {
+          "Fn::If": [
+            "S3TriggerEnabled",
+            {
+              "LambdaConfigurations": [
+                {
+                  "Event": "s3:ObjectCreated:*",
+                  "Filter": {
+                    "S3Key": {
+                      "Rules": [
+                        { "Name": "prefix", "Value": "sample/" },
+                        { "Name": "suffix", "Value": ".json" }
+                      ]
+                    }
+                  },
+                  "Function": { "Fn::GetAtt": ["PipelineFunction", "Arn"] }
+                }
+              ]
+            },
+            { "Ref": "AWS::NoValue" }
+          ]
+        }
+      }
+    },
+    "OutputBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": { "Fn::Sub": "${ProjectName}-output-${AWS::AccountId}" },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            { "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" } }
+          ]
+        }
+      }
+    },
+    "PipelineExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": { "Fn::Sub": "${ProjectName}-lambda-role" },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "Service": "lambda.amazonaws.com" },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "pipeline-permissions",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadWriteInput",
+                  "Effect": "Allow",
+                  "Action": ["s3:GetObject", "s3:PutObject"],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:s3:::${ProjectName}-input-${AWS::AccountId}/*"
+                  }
+                },
+                {
+                  "Sid": "WriteOutput",
+                  "Effect": "Allow",
+                  "Action": ["s3:PutObject"],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:s3:::${ProjectName}-output-${AWS::AccountId}/*"
+                  }
+                },
+                {
+                  "Sid": "Translate",
+                  "Effect": "Allow",
+                  "Action": [
+                    "translate:TranslateText",
+                    "comprehend:DetectDominantLanguage"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "Bedrock",
+                  "Effect": "Allow",
+                  "Action": ["bedrock:InvokeModel"],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "PipelineFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": { "Fn::Sub": "${ProjectName}-processor" },
+        "Runtime": "python3.12",
+        "Handler": "src.api.lambda_handler.handler",
+        "Role": { "Fn::GetAtt": ["PipelineExecutionRole", "Arn"] },
+        "Timeout": 300,
+        "MemorySize": 512,
+        "Code": {
+          "S3Bucket": { "Ref": "LambdaCodeS3Bucket" },
+          "S3Key": { "Ref": "LambdaCodeS3Key" }
+        },
+        "Environment": {
+          "Variables": {
+            "INPUT_BUCKET": { "Fn::Sub": "${ProjectName}-input-${AWS::AccountId}" },
+            "OUTPUT_BUCKET": { "Fn::Sub": "${ProjectName}-output-${AWS::AccountId}" },
+            "BEDROCK_MODEL_ID": { "Ref": "BedrockModelId" },
+            "QUALITY_THRESHOLD": { "Ref": "QualityThreshold" }
+          }
+        }
+      }
+    },
+    "PipelineInvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Condition": "S3TriggerEnabled",
+      "Properties": {
+        "FunctionName": { "Fn::GetAtt": ["PipelineFunction", "Arn"] },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "s3.amazonaws.com",
+        "SourceAccount": { "Ref": "AWS::AccountId" },
+        "SourceArn": {
+          "Fn::Sub": "arn:aws:s3:::${ProjectName}-input-${AWS::AccountId}"
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "InputBucketName": {
+      "Description": "Reviews JSON is written here (under sample/) by the generate action.",
+      "Value": { "Ref": "InputBucket" }
+    },
+    "OutputBucketName": {
+      "Description": "Surfaced results and run_summary.json land here. Set this as OUTPUT_BUCKET for the local control plane.",
+      "Value": { "Ref": "OutputBucket" }
+    },
+    "FunctionName": {
+      "Description": "The pipeline Lambda function name. Set this as PIPELINE_FUNCTION for the local control plane.",
+      "Value": { "Ref": "PipelineFunction" }
+    }
+  }
+}
