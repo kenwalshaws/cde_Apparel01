@@ -7,6 +7,10 @@ __pycache__/
 # Build artifacts
 build/
 pipeline.zip
+*.egg-info/
+
+# TypeScript incremental build cache
+gui/*.tsbuildinfo
 
 # Node / GUI
 gui/node_modules/
