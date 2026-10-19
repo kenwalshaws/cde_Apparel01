@@ -12,12 +12,21 @@ pipeline.zip
 # TypeScript incremental build cache
 gui/*.tsbuildinfo
 
+# Safety net: never commit anything under a .secrets dir (deploy prints the
+# one-time temporary password to the terminal; it is not written to disk).
+.secrets/
+
+# GUI env files written by deploy (contain API/auth config)
+gui/.env.local
+gui/.env.production.local
+
 # Node / GUI
 gui/node_modules/
 gui/dist/
 
-# Generated pipeline outputs (results are reproducible from a run)
-data/outputs/
+# Local offline-run scratch (generate_synthetic.py / run_local.py defaults).
+# The deployed pipeline uses S3, not these local dirs.
+data/
 
 # OS
 .DS_Store

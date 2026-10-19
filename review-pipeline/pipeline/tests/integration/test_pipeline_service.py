@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Integration test for the pipeline orchestration using fake clients.
 
-Exercises the full translate -> summarize -> translate -> score flow without
-touching AWS. Fakes stand in for the client layer.
+Exercises the English-source flow (summarize once -> translate the summary
+into each target -> combined row) without touching AWS.
 """
 
 from src.config import load_config
@@ -13,16 +13,13 @@ from src.model import Review
 
 
 class FakeTranslate:
-    """Returns deterministic translations and records calls."""
-
     def __init__(self):
         self.calls = []
 
     def translate(self, text, target_language, source_language="auto"):
         self.calls.append((text, source_language, target_language))
-        prefix = f"[{target_language}] "
         return TranslationResult(
-            text=prefix + text,
+            text=f"[{target_language}] {text}",
             source_language=source_language,
             target_language=target_language,
             detected_source_language=target_language,
@@ -30,7 +27,11 @@ class FakeTranslate:
 
 
 class FakeBedrock:
+    def __init__(self):
+        self.calls = 0
+
     def summarize(self, english_text, max_tokens=160):
+        self.calls += 1
         return SummarizationResult(
             summary="The item fits well and feels good. The buyer was satisfied.",
             input_tokens=20,
@@ -38,54 +39,49 @@ class FakeBedrock:
         )
 
 
-def _service():
-    return PipelineService(FakeTranslate(), FakeBedrock(), load_config())
-
-
-def test_french_review_runs_end_to_end_and_surfaces():
-    review = Review(
-        review_id="rev-0003",
+def _english_review():
+    return Review(
+        review_id="rev-0001",
         product="jacket",
-        source_language="fr",
-        rating=4,
-        text="Il taille très bien. Le tissu est doux. Je le rachèterais.",
-        date="2026-10-01",
-    )
-    result = _service().process_review(review, "de")
-
-    assert [s.name for s in result.steps] == [
-        "translate_source",
-        "summarize",
-        "translate_summary",
-    ]
-    assert result.target_language == "de"
-    assert result.surfaced is True
-    assert result.summary_translated.startswith("[de] ")
-
-
-def test_english_source_skips_first_translation():
-    svc = _service()
-    review = Review(
-        review_id="rev-0002",
-        product="dress",
+        product_id="PRD-0001-abc123",
+        product_name="Heritage Wool Jacket",
         source_language="en",
-        rating=5,
-        text="The fit is spot on. The fabric feels soft. Very satisfied.",
+        rating=4,
+        text="The fit is spot on. The fabric feels soft. I would buy it again.",
         date="2026-10-01",
     )
-    result = svc.process_review(review, "fr")
-
-    first_step = result.steps[0]
-    assert first_step.name == "translate_source"
-    assert first_step.detail.get("skipped") is True
 
 
-def test_process_batch_covers_every_target():
-    reviews = [
-        Review("rev-1", "hat", "fr", 4, "Bon produit.", "2026-10-01"),
-        Review("rev-2", "shoes", "de", 2, "Zu klein.", "2026-10-01"),
-    ]
-    results = _service().process_batch(reviews, ["fr", "de"])
+def test_summarize_and_translate_produces_combined_row():
+    bedrock = FakeBedrock()
+    translate = FakeTranslate()
+    svc = PipelineService(translate, bedrock, load_config())
+
+    row = svc.summarize_and_translate(_english_review(), ["de", "fr"])
+
+    # Exactly one summarize call for both target languages.
+    assert bedrock.calls == 1
+    # One translate call per target.
+    assert len(translate.calls) == 2
+
+    assert row["english_review"].startswith("The fit is spot on")
+    assert row["english_summary"].startswith("The item fits well")
+    assert row["de_summary"].startswith("[de] ")
+    assert row["fr_summary"].startswith("[fr] ")
+    assert row["surfaced"] is True
+
+
+def test_process_review_single_target_still_works():
+    svc = PipelineService(FakeTranslate(), FakeBedrock(), load_config())
+    result = svc.process_review(_english_review(), "de")
+    assert [s.name for s in result.steps] == ["summarize", "translate_summary"]
+    assert result.summary_translated.startswith("[de] ")
+    assert result.surfaced is True
+
+
+def test_process_batch_covers_de_and_fr():
+    results = PipelineService(FakeTranslate(), FakeBedrock(), load_config()).process_batch(
+        [_english_review(), _english_review()], ["de", "fr"]
+    )
     assert len(results) == 4
-    langs = {r.target_language for r in results}
-    assert langs == {"fr", "de"}
+    assert {r.target_language for r in results} == {"de", "fr"}

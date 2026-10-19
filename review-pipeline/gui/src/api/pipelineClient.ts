@@ -1,38 +1,44 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-// Thin client over the local FastAPI backend. Requests go through the Vite
-// proxy (/api -> http://localhost:8000), so these are same-origin in dev.
+// Client for the pipeline backend. Two modes, chosen at build time:
+//
+//   VITE_API_BASE set   -> call API Gateway directly (everything runs in AWS).
+//                          Routes: /generate, /process, /jobs, /job.
+//   VITE_API_BASE unset -> call the local FastAPI control plane via the Vite
+//                          proxy (/api -> localhost:8000). Process route /run,
+//                          job detail route /job/<jobnum>.
+//
+// The rest of the app calls the same functions regardless of mode.
 
-import type { PipelineResult, RunSummary } from "../types";
+import type { SubmitResponse, JobDetail } from "../types";
+import { getToken } from "./auth";
 
-const BASE = "/api";
+const API_BASE = import.meta.env.VITE_API_BASE as string | undefined;
+const API_KEY = import.meta.env.VITE_API_KEY as string | undefined;
+
+const USING_APIGW = Boolean(API_BASE);
+const BASE = API_BASE ? API_BASE.replace(/\/$/, "") : "/api";
+const PROCESS_PATH = USING_APIGW ? "/process" : "/run";
+
+function headers(withBody: boolean): HeadersInit {
+  const h: Record<string, string> = {};
+  if (withBody) h["Content-Type"] = "application/json";
+  if (API_KEY) h["x-api-key"] = API_KEY;
+  const token = getToken();
+  if (token) h["Authorization"] = token; // Cognito JWT for the API GW authorizer
+  return h;
+}
 
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) {
-    throw new Error(`GET ${path} failed: ${res.status} ${res.statusText}`);
-  }
+  const res = await fetch(`${BASE}${path}`, { headers: headers(false) });
+  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status} ${res.statusText}`);
   return (await res.json()) as T;
-}
-
-export async function fetchResults(lang?: string): Promise<PipelineResult[]> {
-  const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
-  return getJson<PipelineResult[]>(`/results${query}`);
-}
-
-export async function fetchSummary(): Promise<RunSummary | null> {
-  const res = await fetch(`${BASE}/summary`);
-  if (res.status === 404) return null;
-  if (!res.ok) {
-    throw new Error(`GET /summary failed: ${res.status} ${res.statusText}`);
-  }
-  return (await res.json()) as RunSummary;
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: headers(true),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -40,8 +46,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     try {
       const err = await res.json();
       if (err?.detail) detail = JSON.stringify(err.detail);
+      else if (err?.error) detail = String(err.error);
     } catch {
-      // non-JSON error body; keep the status text
+      /* non-JSON error body */
     }
     throw new Error(`POST ${path} failed: ${detail}`);
   }
@@ -51,7 +58,6 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 export interface GenerateRequest {
   count?: number;
   seed?: number;
-  key?: string;
 }
 
 export interface GenerateResponse {
@@ -62,18 +68,29 @@ export interface GenerateResponse {
   by_source_language: Record<string, number>;
 }
 
-// Asks the deployed Lambda (via the local control plane) to generate a
-// synthetic corpus and upload it to the input bucket.
+// Generate a synthetic corpus in-Lambda and upload it to the input bucket.
 export async function generateReviews(req: GenerateRequest = {}): Promise<GenerateResponse> {
   return postJson<GenerateResponse>("/generate", req);
 }
 
-export interface RunRequest {
-  input_key?: string;
-  targets?: string[];
+// Submit a job. The backend returns immediately with the jobnum and status
+// "running"; the actual work runs asynchronously. Poll fetchJob for completion.
+export async function submitJob(): Promise<SubmitResponse> {
+  return postJson<SubmitResponse>(PROCESS_PATH, { input_key: "sample/reviews.json" });
 }
 
-// Asks the deployed Lambda (via the local control plane) to process the corpus.
-export async function runPipeline(req: RunRequest = {}): Promise<RunSummary> {
-  return postJson<RunSummary>("/run", req);
+// List job ids, newest first.
+export async function fetchJobs(): Promise<string[]> {
+  const data = await getJson<{ jobs: string[] }>("/jobs");
+  return data.jobs ?? [];
+}
+
+// Fetch one job's inputs, results, and summary.
+export async function fetchJob(jobnum: string): Promise<JobDetail> {
+  if (USING_APIGW) {
+    // API Gateway: /job with jobnum in the query string.
+    return getJson<JobDetail>(`/job?jobnum=${encodeURIComponent(jobnum)}`);
+  }
+  // Local control plane: path param.
+  return getJson<JobDetail>(`/job/${encodeURIComponent(jobnum)}`);
 }

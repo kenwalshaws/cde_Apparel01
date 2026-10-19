@@ -16,13 +16,35 @@ from __future__ import annotations
 import random
 from datetime import date, timedelta
 
-from ..model import Review, SOURCE_LANGUAGES
+from ..debug import debug_print
+from ..model import Review
 
 
 PRODUCTS = ["shirt", "hat", "pants", "jacket", "coat", "shoes", "dress", "scarf"]
 
-# Each language provides phrasing for three fragments (fit, material, overall)
-# across three sentiment buckets. Fragments compose into a 3-sentence review.
+# Word pools used to compose a marketing-style product name, e.g.
+# "Classic Cotton Shirt" or "Heritage Wool Coat".
+_NAME_ADJECTIVES = [
+    "Classic", "Heritage", "Everyday", "Signature", "Essential",
+    "Vintage", "Modern", "Tailored", "Premium", "Urban",
+]
+_NAME_MATERIALS = [
+    "Cotton", "Wool", "Linen", "Denim", "Merino", "Oxford", "Canvas", "Suede",
+]
+
+
+def _product_name(product: str, rng: random.Random) -> str:
+    """Compose a marketing-style product name from the category."""
+    adjective = rng.choice(_NAME_ADJECTIVES)
+    # Include a material roughly two-thirds of the time for variety.
+    if rng.random() < 0.67:
+        material = rng.choice(_NAME_MATERIALS)
+        return f"{adjective} {material} {product.capitalize()}"
+    return f"{adjective} {product.capitalize()}"
+
+# Each language provides phrasing for several aspects across three sentiment
+# buckets. English (the only source language used now) has enough aspects to
+# compose 5-8 sentence reviews; see _compose_review.
 PHRASES: dict[str, dict[str, dict[str, list[str]]]] = {
     "en": {
         "fit": {
@@ -34,6 +56,26 @@ PHRASES: dict[str, dict[str, dict[str, list[str]]]] = {
             "pos": ["The fabric feels soft and well made.", "The material is excellent quality."],
             "mid": ["The material is okay, nothing special.", "The fabric is a bit thin."],
             "neg": ["The fabric feels cheap.", "The material frayed after one wash."],
+        },
+        "color": {
+            "pos": ["The color is rich and exactly as pictured.", "The shade looks great in person."],
+            "mid": ["The color is close to the photos but slightly duller.", "The shade is fine, a touch off."],
+            "neg": ["The color is nothing like the listing photos.", "The shade faded after the first wash."],
+        },
+        "comfort": {
+            "pos": ["It is really comfortable to wear all day.", "It feels soft against the skin."],
+            "mid": ["It is reasonably comfortable once broken in.", "Comfort is average, nothing to note."],
+            "neg": ["It is itchy and uncomfortable.", "It feels stiff and never softened up."],
+        },
+        "delivery": {
+            "pos": ["Delivery was fast and the packaging was neat.", "It arrived a day early and well packed."],
+            "mid": ["Delivery took about as long as expected.", "Shipping was on time, packaging was plain."],
+            "neg": ["Delivery was slow and the box was crushed.", "It took two weeks longer than promised."],
+        },
+        "value": {
+            "pos": ["Great value for the price.", "Well worth what I paid."],
+            "mid": ["The price feels about right for what you get.", "Fairly priced, not a steal."],
+            "neg": ["Overpriced for the quality.", "Not worth the money at all."],
         },
         "overall": {
             "pos": ["Very satisfied with this purchase.", "I would happily buy it again."],
@@ -137,33 +179,60 @@ SENTIMENTS = [
 
 
 def _compose_review(lang: str, sentiment: str, rng: random.Random) -> str:
+    """Compose a 5-8 sentence review from the aspect pools.
+
+    Leads with the fit aspect and closes with the overall aspect; the middle is
+    a random selection of the remaining aspects. Target length is 5-8 sentences
+    when the language has enough aspects (English); languages with fewer aspects
+    use all of them.
+    """
     pool = PHRASES[lang]
-    parts = [
-        rng.choice(pool["fit"][sentiment]),
-        rng.choice(pool["material"][sentiment]),
-        rng.choice(pool["overall"][sentiment]),
-    ]
+    all_aspects = list(pool.keys())
+
+    lead = "fit" if "fit" in pool else all_aspects[0]
+    close = "overall" if "overall" in pool else all_aspects[-1]
+    middle_aspects = [a for a in all_aspects if a not in (lead, close)]
+
+    target = rng.randint(5, 8)
+    # Sentences needed from the middle (lead + close are fixed).
+    need_middle = max(0, target - 2)
+    rng.shuffle(middle_aspects)
+    chosen_middle = middle_aspects[:need_middle]
+
+    ordered = [lead, *chosen_middle, close]
+    parts = [rng.choice(pool[aspect][sentiment]) for aspect in ordered]
     return " ".join(parts)
 
 
 def generate_reviews(count: int, seed: int = 42) -> list[Review]:
-    """Return `count` synthetic Review objects, reproducible for a given seed."""
+    """Return `count` synthetic Review objects, reproducible for a given seed.
+
+    This use case produces English-only reviews: summarization and the
+    summary-translation steps operate on English source text.
+    """
     rng = random.Random(seed)
     today = date.today()
     reviews: list[Review] = []
 
     for i in range(count):
-        lang = rng.choice(SOURCE_LANGUAGES)
+        lang = "en"  # English-only source for this use case.
         sentiment, (lo, hi) = rng.choice(SENTIMENTS)
         rating = rng.randint(lo, hi)
         product = rng.choice(PRODUCTS)
         text = _compose_review(lang, sentiment, rng)
         review_date = today - timedelta(days=rng.randint(0, 30))
 
+        # Unique, human-readable product id per review: PRD-<seq>-<rand hex>.
+        # Seeded, so a given (count, seed) reproduces the same ids.
+        product_id = f"PRD-{i + 1:04d}-{rng.randrange(16**6):06x}"
+        product_name = _product_name(product, rng)
+
         reviews.append(
             Review(
                 review_id=f"rev-{i + 1:04d}",
                 product=product,
+                product_id=product_id,
+                product_name=product_name,
                 source_language=lang,
                 rating=rating,
                 text=text,
@@ -171,4 +240,5 @@ def generate_reviews(count: int, seed: int = 42) -> list[Review]:
             )
         )
 
+    debug_print(f"generated {len(reviews)} English reviews (seed={seed})")
     return reviews

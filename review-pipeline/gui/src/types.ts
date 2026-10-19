@@ -1,41 +1,60 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-// Mirrors the Python model layer (model/review.py). Keep in sync with the
-// PipelineResult / StepResult dataclasses.
+// Shapes returned by the pipeline backend (job-scoped).
 
-export interface StepResult {
-  name: string;
-  output: string;
-  score: number;
-  passed: boolean;
-  detail: Record<string, unknown>;
-}
-
-export interface PipelineResult {
+// One row in a job's results.json.
+export interface ResultRow {
   review_id: string;
   product: string;
-  source_language: string;
-  target_language: string;
-  original_text: string;
-  english_text: string;
-  summary_en: string;
-  summary_translated: string;
-  steps: StepResult[];
+  product_id: string;
+  product_name: string;
+  english_review: string;
+  english_summary: string;
+  de_summary: string;
+  fr_summary: string;
   surfaced: boolean;
 }
 
-export interface PerLanguageSummary {
-  count: number;
-  surfaced: number;
-  surfaced_pct: number;
-  mean_score: number;
+// One review in a job's inputs/samples.json.
+export interface ReviewInput {
+  review_id: string;
+  product: string;
+  product_id: string;
+  product_name: string;
+  source_language: string;
+  rating: number;
+  text: string;
+  date: string;
 }
 
-export interface RunSummary {
-  total_results: number;
+// Per-job summary (results/summary.json, also returned by /process).
+export interface JobSummary {
+  jobnum: string;
+  reviews: number;
+  rows: number;
   surfaced: number;
   surfaced_pct: number;
   elapsed_seconds: number;
-  mean_seconds_per_result: number;
-  per_language: Record<string, PerLanguageSummary>;
+  targets: string[];
+  model_id: string;
+  created_utc: string;
+}
+
+export type JobStatus = "running" | "complete" | "error" | "unknown";
+
+// Response from /process (dispatcher): returns immediately with the jobnum.
+export interface SubmitResponse {
+  jobnum: string;
+  status: JobStatus;
+  reviews?: number;
+}
+
+// Full job detail returned by /job.
+export interface JobDetail {
+  jobnum: string;
+  status: JobStatus;
+  status_detail?: Record<string, unknown>;
+  inputs: ReviewInput[];
+  results: ResultRow[];
+  summary: Partial<JobSummary>;
 }
