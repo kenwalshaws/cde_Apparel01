@@ -36,6 +36,7 @@ import os
 from typing import Any
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -64,11 +65,34 @@ def _output_bucket() -> str:
 
 def _invoke_lambda(payload: dict[str, Any]) -> dict[str, Any]:
     """Synchronously invoke the deployed Lambda and parse its response."""
-    resp = _lambda.invoke(
-        FunctionName=_function_name(),
-        InvocationType="RequestResponse",
-        Payload=json.dumps(payload).encode("utf-8"),
-    )
+    function = _function_name()
+    try:
+        resp = _lambda.invoke(
+            FunctionName=function,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+    except NoCredentialsError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="No AWS credentials found for the control plane. "
+            "Set them in the shell before starting uvicorn.",
+        ) from exc
+    except ClientError as exc:
+        err = exc.response.get("Error", {})
+        code = err.get("Code", "ClientError")
+        message = err.get("Message", str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Lambda invoke failed ({code}) for function '{function}' "
+            f"in region '{_REGION}': {message}",
+        ) from exc
+    except BotoCoreError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"AWS SDK error invoking '{function}' in region '{_REGION}': {exc}",
+        ) from exc
+
     raw = resp["Payload"].read()
     if resp.get("FunctionError"):
         raise HTTPException(status_code=502, detail=f"Lambda error: {raw.decode('utf-8')}")
@@ -125,35 +149,17 @@ def generate(req: GenerateRequest) -> dict[str, Any]:
 
 @app.post("/run")
 def run(req: ProcessRequest) -> dict[str, Any]:
-    """Ask the deployed Lambda to process the corpus for the target languages."""
-    return _invoke_lambda(
-        {"action": "process", "input_key": req.input_key, "targets": req.targets}
-    )
+    """Ask the deployed Lambda to run a job over the corpus. Returns the job summary."""
+    return _invoke_lambda({"action": "process", "input_key": req.input_key})
 
 
-@app.get("/results")
-def results(lang: str | None = None) -> list[dict[str, Any]]:
-    """Read surfaced result files from the output bucket, optionally by language."""
-    bucket = _output_bucket()
-    prefix = f"translated_summaries/{lang}/" if lang else "translated_summaries/"
-
-    out: list[dict[str, Any]] = []
-    paginator = _s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith(".json"):
-                continue
-            body = _s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-            out.append(json.loads(body))
-    return out
+@app.get("/jobs")
+def jobs() -> dict[str, Any]:
+    """List job ids (newest first)."""
+    return _invoke_lambda({"action": "jobs"})
 
 
-@app.get("/summary")
-def summary() -> dict[str, Any]:
-    bucket = _output_bucket()
-    try:
-        body = _s3.get_object(Bucket=bucket, Key="run_summary.json")["Body"].read()
-    except _s3.exceptions.NoSuchKey:
-        raise HTTPException(status_code=404, detail="no run summary yet; run the pipeline first")
-    return json.loads(body)
+@app.get("/job/{jobnum}")
+def job(jobnum: str) -> dict[str, Any]:
+    """Return one job's inputs, results, and summary."""
+    return _invoke_lambda({"action": "job", "jobnum": jobnum})

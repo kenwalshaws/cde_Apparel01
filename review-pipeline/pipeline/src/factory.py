@@ -19,3 +19,13 @@ def build_pipeline(config: Config | None = None) -> PipelineService:
     translate_client = TranslateClient(region=cfg.region)
     bedrock_client = BedrockClient(region=cfg.region, model_id=cfg.bedrock_model_id)
     return PipelineService(translate_client, bedrock_client, cfg)
+
+
+def build_pipeline_with_config(config: Config) -> PipelineService:
+    """Build the pipeline from an already-resolved Config.
+
+    Used by the Lambda handler after it resolves the Bedrock model id from
+    config.json in the input bucket. Explicit alias so the call site reads
+    clearly; identical wiring to build_pipeline.
+    """
+    return build_pipeline(config)

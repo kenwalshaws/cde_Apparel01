@@ -14,10 +14,12 @@ from typing import Any
 
 
 # Supported source languages in the synthetic corpus. ISO 639-1 codes.
-SOURCE_LANGUAGES = ("en", "fr", "de", "es", "it", "nl")
+# This use case: reviews start in English, are summarized, and the English
+# summary is translated into the target languages below.
+SOURCE_LANGUAGES = ("en",)
 
-# Target shopper languages proven in this prototype.
-TARGET_LANGUAGES = ("fr", "de")
+# Target languages: the English summary is translated into German and French.
+TARGET_LANGUAGES = ("de", "fr")
 
 
 @dataclass
@@ -25,7 +27,9 @@ class Review:
     """A single inbound product review (synthetic, no PII)."""
 
     review_id: str
-    product: str
+    product: str  # category, e.g. "shirt"
+    product_id: str  # unique per review
+    product_name: str  # marketing-style name, e.g. "Classic Oxford Shirt"
     source_language: str
     rating: int  # 1-5 stars
     text: str
@@ -36,6 +40,9 @@ class Review:
         return cls(
             review_id=str(data["review_id"]),
             product=str(data["product"]),
+            # Tolerate older inputs that predate these fields.
+            product_id=str(data.get("product_id", "")),
+            product_name=str(data.get("product_name", "")),
             source_language=str(data["source_language"]),
             rating=int(data["rating"]),
             text=str(data["text"]),

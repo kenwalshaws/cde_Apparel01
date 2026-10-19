@@ -9,13 +9,31 @@ def test_review_roundtrip():
     data = {
         "review_id": "rev-0001",
         "product": "shirt",
-        "source_language": "fr",
+        "product_id": "PRD-0001-abc123",
+        "product_name": "Classic Cotton Shirt",
+        "source_language": "en",
         "rating": 4,
-        "text": "Il taille très bien.",
+        "text": "The fit is spot on.",
         "date": "2026-10-01",
     }
     review = Review.from_dict(data)
     assert review.to_dict() == data
+
+
+def test_review_defaults_optional_fields_when_missing():
+    # Older inputs without product_id/product_name still load (empty strings).
+    review = Review.from_dict(
+        {
+            "review_id": "rev-1",
+            "product": "hat",
+            "source_language": "en",
+            "rating": 3,
+            "text": "Fine.",
+            "date": "2026-10-01",
+        }
+    )
+    assert review.product_id == ""
+    assert review.product_name == ""
 
 
 def test_review_coerces_rating_to_int():
