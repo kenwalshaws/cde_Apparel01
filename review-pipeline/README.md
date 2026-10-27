@@ -305,6 +305,39 @@ the exact env block.
 
 ---
 
+## Security notes
+
+The project is scanned with ProtoShield (Semgrep, Bandit, Checkov, cfn-nag,
+Gitleaks, a CVE scan, and an IAM least-privilege review). Decisions worth
+knowing:
+
+- **Dependencies are fully pinned.** `pipeline/requirements.txt` is an exact
+  lock of direct and transitive packages. Unpinned transitive dependencies can
+  resolve to old, vulnerable minimums, so re-generate the lock (see the header
+  in that file) when bumping a direct dependency. The GUI is locked by
+  `gui/package-lock.json`; `npm audit` reports no known vulnerabilities. The
+  deployed Lambda uses the runtime's boto3 and bundles only `src/`.
+- **Bedrock access is scoped to the models in `config.json`.** The Lambda role
+  may invoke only Claude Haiku 5.5 (US and global inference profiles) and Nova 2
+  Lite. Foundation-model ARNs keep a region wildcard because cross-Region
+  inference profiles route to other Regions. **To enable another model, add it
+  to `infrastructure/config.json` and to the `Bedrock` statement in
+  `infrastructure/template.json`, then redeploy** — selecting an unlisted model
+  in `config.json` alone fails with an access-denied error by design.
+- **Translate uses `Resource: "*"` with a Region condition.** Amazon Translate
+  text translation has no resource-level permissions to scope to, so the role
+  is limited to the single action `translate:TranslateText` in the deploy
+  Region. This is a known limitation, not an oversight; the customer can add
+  organization-level controls (SCPs, CloudTrail monitoring) if needed.
+- **No secrets in the repo or on disk.** Cognito generates and emails the
+  one-time temporary password; the deploy never sees or stores it.
+- **Not included in this proof of concept** (hardening for the customer's own
+  production effort): S3/API Gateway/CloudFront access logging, S3 versioning,
+  AWS WAF, a VPC for the Lambda, a dead-letter queue, reserved concurrency, and
+  KMS-encrypted Lambda environment variables.
+
+---
+
 ## Scope
 
 **In scope:** English source reviews → summary → German + French translations,

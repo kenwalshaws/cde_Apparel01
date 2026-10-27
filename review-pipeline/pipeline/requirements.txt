@@ -1,10 +1,42 @@
-# Runtime
-boto3==1.34.144
+# Fully pinned dependency lock (direct + transitive) for the local control plane
+# and test tooling. Generated from a clean venv with:
+#   pip install boto3==1.43.119 fastapi==0.162.0 uvicorn==0.54.0 \
+#       pydantic==2.14.1 pytest==9.1.1 && pip freeze
+#
+# Everything is pinned exactly so builds and security scans see the versions
+# that actually install. Unpinned transitive dependencies can resolve to old,
+# vulnerable minimums (e.g. h11, Pygments) and silently drift. Re-generate this
+# file when bumping the direct dependencies.
+#
+# The deployed Lambda does not use this file: it bundles only src/ and relies
+# on the boto3 already present in the Lambda runtime.
 
-# Local API (GUI backend) — not needed in Lambda
-fastapi==0.111.1
-uvicorn==0.30.3
-pydantic==2.8.2
+# Direct dependencies
+boto3==1.43.119
+fastapi==0.162.0
+uvicorn==0.54.0
+pydantic==2.14.1
+pytest==9.1.1
 
-# Dev / test
-pytest==8.3.2
+# Transitive dependencies
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+botocore==1.43.119
+click==8.5.0
+h11==0.16.0
+idna==3.20
+iniconfig==2.3.1
+jmespath==1.1.0
+opentelemetry-api==1.45.1
+packaging==26.3
+pluggy==1.7.0
+pydantic_core==2.50.1
+Pygments==2.21.0
+python-dateutil==2.9.0.post0
+s3transfer==0.19.3
+six==1.17.0
+starlette==1.10.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.8.0

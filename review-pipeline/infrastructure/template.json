@@ -217,10 +217,16 @@
                   "Sid": "Translate",
                   "Effect": "Allow",
                   "Action": [
-                    "translate:TranslateText",
-                    "comprehend:DetectDominantLanguage"
+                    "translate:TranslateText"
                   ],
-                  "Resource": "*"
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": {
+                        "Ref": "AWS::Region"
+                      }
+                    }
+                  }
                 },
                 {
                   "Sid": "Bedrock",
@@ -230,10 +236,16 @@
                   ],
                   "Resource": [
                     {
-                      "Fn::Sub": "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+                      "Fn::Sub": "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
                     },
-                    "arn:aws:bedrock:*::foundation-model/anthropic.*",
-                    "arn:aws:bedrock:*::foundation-model/amazon.*"
+                    {
+                      "Fn::Sub": "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/global.anthropic.claude-haiku-5-5"
+                    },
+                    {
+                      "Fn::Sub": "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-2-lite-v1:0"
+                    },
+                    "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-5-5",
+                    "arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0"
                   ]
                 },
                 {
