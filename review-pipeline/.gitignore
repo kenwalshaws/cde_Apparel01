@@ -30,3 +30,6 @@ data/
 
 # OS
 .DS_Store
+
+# Security scanner output (generated per scan)
+.protoshield/
