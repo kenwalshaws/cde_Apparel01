@@ -12,12 +12,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
+from ..errors import InvalidInputError
 
 # Supported source languages in the synthetic corpus. ISO 639-1 codes.
-SOURCE_LANGUAGES = ("en", "fr", "de", "es", "it", "nl")
+# This use case: reviews start in English, are summarized, and the English
+# summary is translated into the target languages below.
+SOURCE_LANGUAGES = ("en",)
 
-# Target shopper languages proven in this prototype.
-TARGET_LANGUAGES = ("fr", "de")
+# Reference default only. The languages a job actually uses come from
+# `target_languages` in config.json (see src/config.py); this constant is the
+# built-in fallback and is not read by the deployed pipeline.
+TARGET_LANGUAGES = ("de", "fr")
+
+# Fields every input review must carry. `source_language` is required for
+# format stability but is not used yet: all text is treated as English.
+_REQUIRED_FIELDS = ("review_id", "product", "source_language", "rating", "text", "date")
 
 
 @dataclass
@@ -25,7 +34,9 @@ class Review:
     """A single inbound product review (synthetic, no PII)."""
 
     review_id: str
-    product: str
+    product: str  # category, e.g. "shirt"
+    product_id: str  # unique per review
+    product_name: str  # marketing-style name, e.g. "Classic Oxford Shirt"
     source_language: str
     rating: int  # 1-5 stars
     text: str
@@ -33,11 +44,32 @@ class Review:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Review":
+        """Build a Review from one JSON object.
+
+        Raises InvalidInputError (safe to show) naming the missing field or the
+        bad value, instead of leaking a bare KeyError.
+        """
+        if not isinstance(data, dict):
+            raise InvalidInputError("each review must be a JSON object")
+        missing = [k for k in _REQUIRED_FIELDS if k not in data]
+        if missing:
+            raise InvalidInputError(
+                f"review {data.get('review_id', '?')!r} is missing: {', '.join(missing)}"
+            )
+        try:
+            rating = int(data["rating"])
+        except (TypeError, ValueError) as exc:
+            raise InvalidInputError(
+                f"review {data['review_id']!r}: rating must be an integer"
+            ) from exc
         return cls(
             review_id=str(data["review_id"]),
             product=str(data["product"]),
+            # Tolerate older inputs that predate these fields.
+            product_id=str(data.get("product_id", "")),
+            product_name=str(data.get("product_name", "")),
             source_language=str(data["source_language"]),
-            rating=int(data["rating"]),
+            rating=rating,
             text=str(data["text"]),
             date=str(data["date"]),
         )

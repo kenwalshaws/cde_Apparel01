@@ -9,24 +9,30 @@ from src.service import quality_scorer
 CONFIG = load_config()
 
 
-def test_non_empty_translation_scores_high():
-    score = quality_scorer.score_translation("Bonjour le monde", "fr", "fr")
+def test_real_shaped_translation_scores_high():
+    # Real Translate response for an English->French call reports source "en".
+    score = quality_scorer.score_translation("Bonjour le monde", "Hello world", "en", "en")
     assert score == 1.0
 
 
 def test_empty_translation_scores_zero():
-    score = quality_scorer.score_translation("", "fr", "fr")
+    score = quality_scorer.score_translation("", "Hello world", "en", "en")
     assert score == 0.0
 
 
-def test_language_mismatch_lowers_score():
-    matched = quality_scorer.score_translation("hello", "en", "en")
-    mismatched = quality_scorer.score_translation("hello", "en", "de")
+def test_unexpected_source_language_lowers_score():
+    matched = quality_scorer.score_translation("Hallo Welt", "Hello world", "en", "en")
+    mismatched = quality_scorer.score_translation("Hallo Welt", "Hello world", "en", "es")
     assert matched > mismatched
 
 
+def test_untranslated_echo_lowers_score():
+    echoed = quality_scorer.score_translation("Hello world", "Hello world", "en", "en")
+    assert echoed < 0.7
+
+
 def test_missing_detection_is_neutral_not_zero():
-    score = quality_scorer.score_translation("some text", "fr", None)
+    score = quality_scorer.score_translation("Bonjour", "Hello", "en", None)
     assert 0.0 < score < 1.0
 
 

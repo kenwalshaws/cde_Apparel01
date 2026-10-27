@@ -2,174 +2,237 @@
 # SPDX-License-Identifier: Apache-2.0
 """AWS Lambda entry point.
 
-api layer: a thin adapter. It routes an incoming event to one of three
-actions and delegates the real work to the service layer via the factory.
-No business logic lives here.
+api layer: a thin adapter. It normalizes the incoming event (direct invoke,
+API Gateway proxy, or S3 notification), routes to an action, calls the job
+service, and wraps the response. Job lifecycle, S3 persistence and scoring
+live in the service and client layers (`JobService`, `JobStore`).
 
-Actions (chosen by the event's `action` field; defaults to "process"):
+Actions:
 
-  "generate"  — generate a synthetic review corpus inside the Lambda and
-                upload it to the input bucket.
-                event: {"action": "generate", "count": 100, "seed": 42,
-                        "key": "sample/reviews.json"}
+  "generate"  — generate a synthetic review corpus in-Lambda and upload it to
+                the input bucket.
+                { "action": "generate", "count": 100, "seed": 42,
+                  "key": "sample/reviews.json" }
 
-  "process"   — read a reviews JSON from the input bucket, run the pipeline
-                for each target language, write surfaced results and a run
-                summary to the output bucket.
-                event: {"action": "process", "input_key": "sample/reviews.json",
-                        "targets": ["fr", "de"]}
+  "process"   — dispatcher: create a job (snapshot the input, status
+                `running`), start the work in a second asynchronous
+                invocation of this function, and return the jobnum at once.
+                { "action": "process", "input_key": "sample/reviews.json" }
 
-  S3 trigger  — when the input bucket is configured to notify this function on
-                object creation, the event arrives with a `Records` array.
-                Treated as a "process" of each uploaded key. This trigger is
-                OFF by default and gated behind a CloudFormation parameter; the
-                GUI-driven flow uses the explicit "process" action instead.
+  "_worker"   — internal: run the job (summarize each English review,
+                translate into every target language from config.json,
+                write results). Invoked only by "process".
+
+  "jobs"      — list job ids, newest first.
+                { "action": "jobs" }  ->  { "jobs": ["job-..."] }
+
+  "job"       — return one job's inputs, results, and summary.
+                { "action": "job", "jobnum": "job-..." }
+
+  S3 trigger  — object-created notification (event has a `Records` array).
+                Runs a job for the uploaded key synchronously (there is no
+                29-second API Gateway limit on this path). OFF by default,
+                gated behind a CloudFormation parameter.
+
+Event shapes handled:
+  - Direct Lambda invoke:  {"action": "...", ...}
+  - API Gateway proxy:     {"httpMethod": "...", "path": "...", "body": "..."}
+  - S3 notification:       {"Records": [...]}
+
+Errors: a `UserFacingError` (bad request, bad config, bad input review) returns
+its message with HTTP 400. Any other exception is logged in full and returns a
+generic 500 with the Lambda request id, because raw exception text can contain
+bucket names and ARNs.
 
 Environment variables (set by the CloudFormation template):
-    INPUT_BUCKET, OUTPUT_BUCKET, AWS_REGION, BEDROCK_MODEL_ID, QUALITY_THRESHOLD
+    INPUT_BUCKET, OUTPUT_BUCKET, AWS_REGION, BEDROCK_MODEL_ID (fallback),
+    QUALITY_THRESHOLD, CORS_ALLOW_ORIGIN / CORS_ALLOW_HEADERS / CORS_ALLOW_METHODS
 """
 
 from __future__ import annotations
 
 import json
 import os
-import time
+import traceback
 from typing import Any
 from urllib.parse import unquote_plus
 
 import boto3
 
-from ..config import load_config
-from ..factory import build_pipeline
-from ..model import Review, PipelineResult
-from ..service.synthetic import generate_reviews
-
+from ..errors import InvalidRequestError, UserFacingError
+from ..factory import build_job_service
+from ..service import JobService
 
 _s3 = boto3.client("s3")
+_lambda = boto3.client("lambda")
+
+# CORS headers so a browser (GUI) can call API Gateway cross-origin. The values
+# come from the CloudFormation `Cors` mapping (passed in as environment
+# variables), the same source the API Gateway OPTIONS preflight uses, so the two
+# cannot drift. The defaults below only apply outside the deployed stack.
+# Permissive for the proof of concept; tighten the origin to the CloudFront
+# domain if the API is exposed more widely.
+_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": os.environ.get("CORS_ALLOW_ORIGIN", "*"),
+    "Access-Control-Allow-Headers": os.environ.get(
+        "CORS_ALLOW_HEADERS", "Content-Type,X-Api-Key,Authorization"
+    ),
+    "Access-Control-Allow-Methods": os.environ.get("CORS_ALLOW_METHODS", "GET,POST,OPTIONS"),
+}
 
 
-# --------------------------------------------------------------------------- #
-# S3 helpers
-# --------------------------------------------------------------------------- #
-def _read_reviews_from_s3(bucket: str, key: str) -> list[Review]:
-    obj = _s3.get_object(Bucket=bucket, Key=key)
-    raw = json.loads(obj["Body"].read())
-    return [Review.from_dict(item) for item in raw]
-
-
-def _write_json_to_s3(bucket: str, key: str, payload: Any) -> None:
-    _s3.put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
-        ContentType="application/json",
+def _service() -> JobService:
+    """Build the job service from the environment (one per invocation)."""
+    return build_job_service(
+        _s3,
+        input_bucket=os.environ.get("INPUT_BUCKET", ""),
+        output_bucket=os.environ["OUTPUT_BUCKET"],
     )
 
 
-def _write_result_to_s3(bucket: str, result: PipelineResult) -> None:
-    key = f"translated_summaries/{result.target_language}/{result.review_id}.json"
-    _write_json_to_s3(bucket, key, result.to_dict())
-
-
 # --------------------------------------------------------------------------- #
-# Actions
+# Actions (each returns a plain dict payload; the router wraps the response)
 # --------------------------------------------------------------------------- #
-def _action_generate(event: dict[str, Any]) -> dict[str, Any]:
-    """Generate a synthetic corpus in-Lambda and upload it to the input bucket."""
-    input_bucket = os.environ["INPUT_BUCKET"]
-    count = int(event.get("count", 100))
-    seed = int(event.get("seed", 42))
-    key = event.get("key", "sample/reviews.json")
-
-    reviews = generate_reviews(count, seed)
-    _write_json_to_s3(input_bucket, key, [r.to_dict() for r in reviews])
-
-    by_lang: dict[str, int] = {}
-    for r in reviews:
-        by_lang[r.source_language] = by_lang.get(r.source_language, 0) + 1
-
-    return {
-        "statusCode": 200,
-        "body": json.dumps(
-            {
-                "action": "generate",
-                "bucket": input_bucket,
-                "key": key,
-                "count": len(reviews),
-                "by_source_language": by_lang,
-            }
-        ),
-    }
+def _action_generate(req: dict[str, Any]) -> dict[str, Any]:
+    return _service().generate(
+        count=int(req.get("count", 100)),
+        seed=int(req.get("seed", 42)),
+        key=req.get("key", "sample/reviews.json"),
+    )
 
 
-def _process_keys(pairs: list[tuple[str, str]], targets: list[str]) -> dict[str, Any]:
-    config = load_config()
-    pipeline = build_pipeline(config)
-    output_bucket = os.environ["OUTPUT_BUCKET"]
-    effective_targets = targets or list(config.target_languages)
+def _action_process(req: dict[str, Any]) -> dict[str, Any]:
+    """Dispatcher: create the job, kick off async work, return the jobnum now.
 
-    all_results: list[PipelineResult] = []
-    start = time.time()
-    for bucket, key in pairs:
-        reviews = _read_reviews_from_s3(bucket, key)
-        for review in reviews:
-            for target in effective_targets:
-                result = pipeline.process_review(review, target)
-                all_results.append(result)
-                if result.surfaced:
-                    _write_result_to_s3(output_bucket, result)
-    elapsed = time.time() - start
+    API Gateway times out at 29 seconds, so the heavy work runs in a second
+    asynchronous invocation of this function (InvocationType="Event") and the
+    GUI polls for the result.
+    """
+    input_key = req.get("input_key", "sample/reviews.json")
+    started = _service().start_job(input_key)
 
-    surfaced = sum(1 for r in all_results if r.surfaced)
-    summary = {
-        "total_results": len(all_results),
-        "surfaced": surfaced,
-        "surfaced_pct": round(100 * surfaced / len(all_results), 1) if all_results else 0.0,
-        "elapsed_seconds": round(elapsed, 2),
-        "mean_seconds_per_result": round(elapsed / len(all_results), 3) if all_results else 0.0,
-        "targets": effective_targets,
-    }
-    _write_json_to_s3(output_bucket, "run_summary.json", summary)
-    return {"statusCode": 200, "body": json.dumps(summary)}
+    _lambda.invoke(
+        FunctionName=os.environ["AWS_LAMBDA_FUNCTION_NAME"],
+        InvocationType="Event",
+        Payload=json.dumps(
+            {"action": "_worker", "jobnum": started["jobnum"], "input_key": input_key}
+        ).encode("utf-8"),
+    )
+    return started
 
 
-def _action_process(event: dict[str, Any]) -> dict[str, Any]:
-    input_bucket = os.environ.get("INPUT_BUCKET", "")
-    key = event.get("input_key", "sample/reviews.json")
-    targets = event.get("targets") or []
-    return _process_keys([(input_bucket, key)], targets)
+def _action_worker(req: dict[str, Any]) -> dict[str, Any]:
+    """Async worker entry point: runs the job. Invoked by the dispatcher only."""
+    return _service().run_job(
+        req["jobnum"], req.get("input_key", "sample/reviews.json")
+    )
+
+
+def _action_jobs(_req: dict[str, Any]) -> dict[str, Any]:
+    return _service().list_jobs()
+
+
+def _action_job(req: dict[str, Any]) -> dict[str, Any]:
+    jobnum = req.get("jobnum", "")
+    if not jobnum:
+        return {"error": "jobnum is required"}
+    return _service().get_job(jobnum)
 
 
 def _action_s3_trigger(event: dict[str, Any]) -> dict[str, Any]:
-    """Handle an S3 object-created notification (OFF by default)."""
-    input_bucket = os.environ.get("INPUT_BUCKET", "")
-    pairs: list[tuple[str, str]] = []
+    """Run a job for the first uploaded key in an S3 notification."""
+    service = _service()
     for record in event.get("Records", []):
-        s3 = record.get("s3", {})
-        bucket = s3.get("bucket", {}).get("name", input_bucket)
-        key = unquote_plus(s3.get("object", {}).get("key", ""))
+        key = unquote_plus(record.get("s3", {}).get("object", {}).get("key", ""))
         if key:
-            pairs.append((bucket, key))
-    if not pairs:
-        return {"statusCode": 400, "body": json.dumps({"error": "no S3 records in event"})}
-    return _process_keys(pairs, [])
+            started = service.start_job(key)
+            return service.run_job(started["jobnum"], key)
+    return {"error": "no S3 records in event"}
+
+
+# --------------------------------------------------------------------------- #
+# Event normalization
+# --------------------------------------------------------------------------- #
+def _normalize(event: dict[str, Any]) -> tuple[str, dict[str, Any], bool]:
+    """Return (action, request-dict, is_api_gateway).
+
+    Handles API Gateway proxy events (action comes from the path, params from
+    the JSON body + query string) and direct invokes (action + params inline).
+    Raises InvalidRequestError when an API Gateway body is not valid JSON, so
+    the caller gets a 400 instead of silent defaults.
+    """
+    # API Gateway REST proxy integration.
+    if "httpMethod" in event or "requestContext" in event:
+        path = (event.get("path") or "").rstrip("/")
+        action = path.rsplit("/", 1)[-1] if path else ""
+        req: dict[str, Any] = {}
+        body = event.get("body")
+        if body:
+            try:
+                parsed = json.loads(body)
+            except (ValueError, TypeError) as exc:
+                print("invalid JSON request body:", exc)
+                raise InvalidRequestError("request body is not valid JSON") from exc
+            if not isinstance(parsed, dict):
+                raise InvalidRequestError("request body must be a JSON object")
+            req.update(parsed)
+        qs = event.get("queryStringParameters") or {}
+        req.update({k: v for k, v in qs.items() if v is not None})
+        return action.lower(), req, True
+
+    # Direct invoke.
+    return (event.get("action") or "process").lower(), event, False
+
+
+def _respond(payload: Any, is_api_gateway: bool, status: int = 200) -> dict[str, Any]:
+    """Wrap a payload for either an API Gateway proxy response or direct invoke."""
+    if is_api_gateway:
+        return {
+            "statusCode": status,
+            "headers": {"Content-Type": "application/json", **_CORS_HEADERS},
+            "body": json.dumps(payload),
+        }
+    # Direct invoke keeps the historical {statusCode, body-string} shape so the
+    # local control plane's parser continues to work unchanged.
+    return {"statusCode": status, "body": json.dumps(payload)}
 
 
 # --------------------------------------------------------------------------- #
 # Router
 # --------------------------------------------------------------------------- #
+_DISPATCH = {
+    "generate": _action_generate,
+    "process": _action_process,
+    "_worker": _action_worker,
+    "jobs": _action_jobs,
+    "job": _action_job,
+}
+
+
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
-    # S3 notifications arrive with a Records array and no action field.
-    if "Records" in event:
-        return _action_s3_trigger(event)
+    is_api_gw = "httpMethod" in event or "requestContext" in event
+    request_id = getattr(context, "aws_request_id", None)
+    try:
+        # S3 notifications arrive with a Records array and no action field.
+        if "Records" in event:
+            return _respond(_action_s3_trigger(event), False)
 
-    action = (event.get("action") or "process").lower()
-    if action == "generate":
-        return _action_generate(event)
-    if action == "process":
-        return _action_process(event)
+        action, req, is_api_gw = _normalize(event)
 
-    return {
-        "statusCode": 400,
-        "body": json.dumps({"error": f"unknown action: {action}"}),
-    }
+        # CORS preflight from the browser.
+        if is_api_gw and event.get("httpMethod") == "OPTIONS":
+            return _respond({"ok": True}, True)
+
+        fn = _DISPATCH.get(action)
+        if fn is None:
+            return _respond({"error": f"unknown action: {action or '(none)'}"}, is_api_gw, 400)
+        return _respond(fn(req), is_api_gw)
+    except UserFacingError as exc:
+        # The message was written by this project, so it is safe to return.
+        return _respond({"error": str(exc)}, is_api_gw, 400)
+    except Exception:  # noqa: BLE001 - last-resort boundary for every action
+        # Full detail stays in CloudWatch. The caller gets a generic message
+        # (still with CORS headers, so the browser shows the real status code
+        # instead of a CORS error) plus the request id to find the log entry.
+        print("handler error:", traceback.format_exc())
+        return _respond({"error": "internal error", "request_id": request_id}, is_api_gw, 500)

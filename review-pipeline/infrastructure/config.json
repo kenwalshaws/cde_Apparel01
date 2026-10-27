@@ -1,0 +1,27 @@
+{
+  "_comment": "Runtime configuration for the review pipeline. The Lambda reads this file from the input bucket (key: config.json) on each run. Edit it in S3 to change behavior without redeploying. 'default_model' must be one of the ids under 'models'. 'debug' toggles verbose debug logging (CloudWatch). 'target_languages' lists the Amazon Translate codes to translate each summary into (not 'en'; source reviews stay English). 'language_labels' maps a code to the name the GUI shows (optional; the GUI falls back to the code). Note: deploy.sh re-seeds this file, so edits made directly in S3 are overwritten on the next deploy; make lasting edits here.",
+  "debug": true,
+  "target_languages": ["de", "fr"],
+  "language_labels": {
+    "de": "German",
+    "fr": "French"
+  },
+  "default_model": "us.anthropic.claude-haiku-5-5",
+  "models": [
+    {
+      "id": "us.anthropic.claude-haiku-5-5",
+      "label": "Claude Haiku 5.5 (US inference profile) — default",
+      "notes": "Current fast/efficient Claude Haiku. bedrock-runtime requires a geo/global inference profile id; this is the US geo profile."
+    },
+    {
+      "id": "global.anthropic.claude-haiku-5-5",
+      "label": "Claude Haiku 5.5 (global inference profile)",
+      "notes": "Same model, routed globally. Use when single-region data residency is not required."
+    },
+    {
+      "id": "us.amazon.nova-2-lite-v1:0",
+      "label": "Amazon Nova 2 Lite (US inference profile)",
+      "notes": "Low-cost Amazon text model. Like Claude, bedrock-runtime needs the geo inference profile id (us. prefix). The Bedrock client auto-detects Nova and uses the Nova messages/inferenceConfig schema. Ensure model access is enabled."
+    }
+  ]
+}

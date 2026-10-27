@@ -4,8 +4,10 @@
 
 from .translate_client import TranslateClient, TranslationResult
 from .bedrock_client import BedrockClient, SummarizationResult
+from .job_store import JobStore
 
 __all__ = [
+    "JobStore",
     "TranslateClient",
     "TranslationResult",
     "BedrockClient",

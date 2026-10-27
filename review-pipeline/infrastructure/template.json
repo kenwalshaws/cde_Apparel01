@@ -1,5 +1,6 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
+  "Transform": "AWS::LanguageExtensions",
   "Description": "Review translate-and-summarize pipeline (proof of concept). Deploys a Lambda that generates synthetic reviews, and translates/summarizes/scores them with Amazon Translate and Amazon Bedrock, writing results to an output bucket. The GUI drives it via explicit Lambda invokes; the S3 object-created trigger is optional and OFF by default.",
   "Parameters": {
     "ProjectName": {
@@ -16,33 +17,69 @@
       "Default": "lambda/pipeline.zip",
       "Description": "S3 key of the packaged Lambda deployment zip."
     },
-    "BedrockModelId": {
-      "Type": "String",
-      "Default": "anthropic.claude-3-haiku-20240307-v1:0",
-      "Description": "Bedrock model id used for summarization."
+    "BedrockModelIds": {
+      "Type": "CommaDelimitedList",
+      "Default": "us.anthropic.claude-haiku-5-5,global.anthropic.claude-haiku-5-5,us.amazon.nova-2-lite-v1:0",
+      "Description": "Allowed Bedrock inference profile IDs (geo.provider.model form, for example us.anthropic.claude-haiku-5-5). The Lambda role may invoke exactly these profiles and their underlying foundation models; the first one is the fallback model. deploy.sh fills this from the models list in infrastructure/config.json, so that file is the single source of truth. Match the geo prefix to your deploy Region."
     },
     "QualityThreshold": {
       "Type": "String",
       "Default": "0.7",
       "Description": "Minimum per-step score for a result to be surfaced."
     },
+    "ApiAuth": {
+      "Type": "String",
+      "Default": "NONE",
+      "AllowedValues": [
+        "NONE",
+        "API_KEY",
+        "COGNITO"
+      ],
+      "Description": "API Gateway auth mode. NONE: open endpoint (plumbing/PoC only). API_KEY: x-api-key header with basic throttling. COGNITO: user/password login via a Cognito user pool, JWT in the Authorization header (used by the CloudFront-hosted GUI)."
+    },
     "EnableS3Trigger": {
       "Type": "String",
       "Default": "false",
-      "AllowedValues": ["true", "false"],
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
       "Description": "When true, uploading a reviews JSON to the input bucket's sample/ prefix auto-triggers the pipeline Lambda. Default false: the GUI drives processing via explicit Lambda invokes. Flip to true once the GUI flow is proven."
     }
   },
   "Conditions": {
     "S3TriggerEnabled": {
-      "Fn::Equals": [{ "Ref": "EnableS3Trigger" }, "true"]
+      "Fn::Equals": [
+        {
+          "Ref": "EnableS3Trigger"
+        },
+        "true"
+      ]
+    },
+    "ApiKeyRequired": {
+      "Fn::Equals": [
+        {
+          "Ref": "ApiAuth"
+        },
+        "API_KEY"
+      ]
+    },
+    "CognitoEnabled": {
+      "Fn::Equals": [
+        {
+          "Ref": "ApiAuth"
+        },
+        "COGNITO"
+      ]
     }
   },
   "Resources": {
     "InputBucket": {
       "Type": "AWS::S3::Bucket",
       "Properties": {
-        "BucketName": { "Fn::Sub": "${ProjectName}-input-${AWS::AccountId}" },
+        "BucketName": {
+          "Fn::Sub": "${ProjectName}-input-${AWS::AccountId}"
+        },
         "PublicAccessBlockConfiguration": {
           "BlockPublicAcls": true,
           "BlockPublicPolicy": true,
@@ -51,7 +88,11 @@
         },
         "BucketEncryption": {
           "ServerSideEncryptionConfiguration": [
-            { "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" } }
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
           ]
         },
         "NotificationConfiguration": {
@@ -64,16 +105,29 @@
                   "Filter": {
                     "S3Key": {
                       "Rules": [
-                        { "Name": "prefix", "Value": "sample/" },
-                        { "Name": "suffix", "Value": ".json" }
+                        {
+                          "Name": "prefix",
+                          "Value": "sample/"
+                        },
+                        {
+                          "Name": "suffix",
+                          "Value": ".json"
+                        }
                       ]
                     }
                   },
-                  "Function": { "Fn::GetAtt": ["PipelineFunction", "Arn"] }
+                  "Function": {
+                    "Fn::GetAtt": [
+                      "PipelineFunction",
+                      "Arn"
+                    ]
+                  }
                 }
               ]
             },
-            { "Ref": "AWS::NoValue" }
+            {
+              "Ref": "AWS::NoValue"
+            }
           ]
         }
       }
@@ -81,7 +135,9 @@
     "OutputBucket": {
       "Type": "AWS::S3::Bucket",
       "Properties": {
-        "BucketName": { "Fn::Sub": "${ProjectName}-output-${AWS::AccountId}" },
+        "BucketName": {
+          "Fn::Sub": "${ProjectName}-output-${AWS::AccountId}"
+        },
         "PublicAccessBlockConfiguration": {
           "BlockPublicAcls": true,
           "BlockPublicPolicy": true,
@@ -90,7 +146,11 @@
         },
         "BucketEncryption": {
           "ServerSideEncryptionConfiguration": [
-            { "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" } }
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
           ]
         }
       }
@@ -98,13 +158,17 @@
     "PipelineExecutionRole": {
       "Type": "AWS::IAM::Role",
       "Properties": {
-        "RoleName": { "Fn::Sub": "${ProjectName}-lambda-role" },
+        "RoleName": {
+          "Fn::Sub": "${ProjectName}-lambda-role"
+        },
         "AssumeRolePolicyDocument": {
           "Version": "2012-10-17",
           "Statement": [
             {
               "Effect": "Allow",
-              "Principal": { "Service": "lambda.amazonaws.com" },
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
               "Action": "sts:AssumeRole"
             }
           ]
@@ -121,34 +185,58 @@
                 {
                   "Sid": "ReadWriteInput",
                   "Effect": "Allow",
-                  "Action": ["s3:GetObject", "s3:PutObject"],
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject"
+                  ],
                   "Resource": {
                     "Fn::Sub": "arn:aws:s3:::${ProjectName}-input-${AWS::AccountId}/*"
                   }
                 },
                 {
-                  "Sid": "WriteOutput",
+                  "Sid": "ReadWriteOutputObjects",
                   "Effect": "Allow",
-                  "Action": ["s3:PutObject"],
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:GetObject"
+                  ],
                   "Resource": {
                     "Fn::Sub": "arn:aws:s3:::${ProjectName}-output-${AWS::AccountId}/*"
+                  }
+                },
+                {
+                  "Sid": "ListOutputBucket",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:s3:::${ProjectName}-output-${AWS::AccountId}"
                   }
                 },
                 {
                   "Sid": "Translate",
                   "Effect": "Allow",
                   "Action": [
-                    "translate:TranslateText",
-                    "comprehend:DetectDominantLanguage"
+                    "translate:TranslateText"
                   ],
-                  "Resource": "*"
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": {
+                        "Ref": "AWS::Region"
+                      }
+                    }
+                  }
                 },
                 {
-                  "Sid": "Bedrock",
+                  "Sid": "SelfInvokeAsyncWorker",
                   "Effect": "Allow",
-                  "Action": ["bedrock:InvokeModel"],
+                  "Action": [
+                    "lambda:InvokeFunction"
+                  ],
                   "Resource": {
-                    "Fn::Sub": "arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+                    "Fn::Sub": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-processor"
                   }
                 }
               ]
@@ -160,22 +248,67 @@
     "PipelineFunction": {
       "Type": "AWS::Lambda::Function",
       "Properties": {
-        "FunctionName": { "Fn::Sub": "${ProjectName}-processor" },
+        "FunctionName": {
+          "Fn::Sub": "${ProjectName}-processor"
+        },
         "Runtime": "python3.12",
         "Handler": "src.api.lambda_handler.handler",
-        "Role": { "Fn::GetAtt": ["PipelineExecutionRole", "Arn"] },
-        "Timeout": 300,
+        "Role": {
+          "Fn::GetAtt": [
+            "PipelineExecutionRole",
+            "Arn"
+          ]
+        },
+        "Timeout": 600,
         "MemorySize": 512,
         "Code": {
-          "S3Bucket": { "Ref": "LambdaCodeS3Bucket" },
-          "S3Key": { "Ref": "LambdaCodeS3Key" }
+          "S3Bucket": {
+            "Ref": "LambdaCodeS3Bucket"
+          },
+          "S3Key": {
+            "Ref": "LambdaCodeS3Key"
+          }
         },
         "Environment": {
           "Variables": {
-            "INPUT_BUCKET": { "Fn::Sub": "${ProjectName}-input-${AWS::AccountId}" },
-            "OUTPUT_BUCKET": { "Fn::Sub": "${ProjectName}-output-${AWS::AccountId}" },
-            "BEDROCK_MODEL_ID": { "Ref": "BedrockModelId" },
-            "QUALITY_THRESHOLD": { "Ref": "QualityThreshold" }
+            "INPUT_BUCKET": {
+              "Fn::Sub": "${ProjectName}-input-${AWS::AccountId}"
+            },
+            "OUTPUT_BUCKET": {
+              "Fn::Sub": "${ProjectName}-output-${AWS::AccountId}"
+            },
+            "BEDROCK_MODEL_ID": {
+              "Fn::Select": [
+                0,
+                {
+                  "Ref": "BedrockModelIds"
+                }
+              ]
+            },
+            "QUALITY_THRESHOLD": {
+              "Ref": "QualityThreshold"
+            },
+            "CORS_ALLOW_ORIGIN": {
+              "Fn::FindInMap": [
+                "Cors",
+                "Default",
+                "Origin"
+              ]
+            },
+            "CORS_ALLOW_HEADERS": {
+              "Fn::FindInMap": [
+                "Cors",
+                "Default",
+                "Headers"
+              ]
+            },
+            "CORS_ALLOW_METHODS": {
+              "Fn::FindInMap": [
+                "Cors",
+                "Default",
+                "Methods"
+              ]
+            }
           }
         }
       }
@@ -184,28 +317,578 @@
       "Type": "AWS::Lambda::Permission",
       "Condition": "S3TriggerEnabled",
       "Properties": {
-        "FunctionName": { "Fn::GetAtt": ["PipelineFunction", "Arn"] },
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "PipelineFunction",
+            "Arn"
+          ]
+        },
         "Action": "lambda:InvokeFunction",
         "Principal": "s3.amazonaws.com",
-        "SourceAccount": { "Ref": "AWS::AccountId" },
+        "SourceAccount": {
+          "Ref": "AWS::AccountId"
+        },
         "SourceArn": {
           "Fn::Sub": "arn:aws:s3:::${ProjectName}-input-${AWS::AccountId}"
         }
       }
-    }
+    },
+    "RestApi": {
+      "Type": "AWS::ApiGateway::RestApi",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${ProjectName}-api"
+        },
+        "Description": "Review pipeline API. Routes /generate, /process, /results, /summary to the pipeline Lambda.",
+        "EndpointConfiguration": {
+          "Types": [
+            "REGIONAL"
+          ]
+        }
+      }
+    },
+    "ApiProxyResource": {
+      "Type": "AWS::ApiGateway::Resource",
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "ParentId": {
+          "Fn::GetAtt": [
+            "RestApi",
+            "RootResourceId"
+          ]
+        },
+        "PathPart": "{proxy+}"
+      }
+    },
+    "ApiProxyMethod": {
+      "Type": "AWS::ApiGateway::Method",
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "ResourceId": {
+          "Ref": "ApiProxyResource"
+        },
+        "HttpMethod": "ANY",
+        "ApiKeyRequired": {
+          "Fn::If": [
+            "ApiKeyRequired",
+            true,
+            false
+          ]
+        },
+        "AuthorizationType": {
+          "Fn::If": [
+            "CognitoEnabled",
+            "COGNITO_USER_POOLS",
+            "NONE"
+          ]
+        },
+        "AuthorizerId": {
+          "Fn::If": [
+            "CognitoEnabled",
+            {
+              "Ref": "ApiAuthorizer"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
+          ]
+        },
+        "Integration": {
+          "Type": "AWS_PROXY",
+          "IntegrationHttpMethod": "POST",
+          "Uri": {
+            "Fn::Sub": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PipelineFunction.Arn}/invocations"
+          }
+        }
+      }
+    },
+    "ApiProxyOptionsMethod": {
+      "Type": "AWS::ApiGateway::Method",
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "ResourceId": {
+          "Ref": "ApiProxyResource"
+        },
+        "HttpMethod": "OPTIONS",
+        "ApiKeyRequired": false,
+        "AuthorizationType": "NONE",
+        "Integration": {
+          "Type": "MOCK",
+          "RequestTemplates": {
+            "application/json": "{\"statusCode\": 200}"
+          },
+          "IntegrationResponses": [
+            {
+              "StatusCode": "200",
+              "ResponseParameters": {
+                "method.response.header.Access-Control-Allow-Origin": {
+                  "Fn::Sub": [
+                    "'${V}'",
+                    {
+                      "V": {
+                        "Fn::FindInMap": [
+                          "Cors",
+                          "Default",
+                          "Origin"
+                        ]
+                      }
+                    }
+                  ]
+                },
+                "method.response.header.Access-Control-Allow-Headers": {
+                  "Fn::Sub": [
+                    "'${V}'",
+                    {
+                      "V": {
+                        "Fn::FindInMap": [
+                          "Cors",
+                          "Default",
+                          "Headers"
+                        ]
+                      }
+                    }
+                  ]
+                },
+                "method.response.header.Access-Control-Allow-Methods": {
+                  "Fn::Sub": [
+                    "'${V}'",
+                    {
+                      "V": {
+                        "Fn::FindInMap": [
+                          "Cors",
+                          "Default",
+                          "Methods"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              "ResponseTemplates": {
+                "application/json": ""
+              }
+            }
+          ]
+        },
+        "MethodResponses": [
+          {
+            "StatusCode": "200",
+            "ResponseParameters": {
+              "method.response.header.Access-Control-Allow-Origin": true,
+              "method.response.header.Access-Control-Allow-Headers": true,
+              "method.response.header.Access-Control-Allow-Methods": true
+            }
+          }
+        ]
+      }
+    },
+    "ApiDeploymentAuth": {
+      "Type": "AWS::ApiGateway::Deployment",
+      "DependsOn": [
+        "ApiProxyMethod",
+        "ApiProxyOptionsMethod"
+      ],
+      "Properties": {
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "StageName": "prod",
+        "Description": "Deployment including CORS OPTIONS methods and the auth mode."
+      }
+    },
+    "ApiInvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "PipelineFunction",
+            "Arn"
+          ]
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Sub": "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*"
+        }
+      }
+    },
+    "UserPool": {
+      "Type": "AWS::Cognito::UserPool",
+      "Condition": "CognitoEnabled",
+      "Properties": {
+        "UserPoolName": {
+          "Fn::Sub": "${ProjectName}-users"
+        },
+        "AdminCreateUserConfig": {
+          "AllowAdminCreateUserOnly": true,
+          "InviteMessageTemplate": {
+            "EmailSubject": "Your Review Pipeline sign-in",
+            "EmailMessage": "You have been invited to the Review Pipeline.<br/><br/>Username: {username}<br/>Temporary password: {####}<br/><br/>Sign in and you will be prompted to set your own password."
+          }
+        },
+        "EmailConfiguration": {
+          "EmailSendingAccount": "COGNITO_DEFAULT"
+        },
+        "UsernameAttributes": [
+          "email"
+        ],
+        "AutoVerifiedAttributes": [
+          "email"
+        ],
+        "Policies": {
+          "PasswordPolicy": {
+            "MinimumLength": 8,
+            "RequireUppercase": true,
+            "RequireLowercase": true,
+            "RequireNumbers": true,
+            "RequireSymbols": true
+          }
+        }
+      }
+    },
+    "UserPoolClient": {
+      "Type": "AWS::Cognito::UserPoolClient",
+      "Condition": "CognitoEnabled",
+      "Properties": {
+        "ClientName": {
+          "Fn::Sub": "${ProjectName}-gui-client"
+        },
+        "UserPoolId": {
+          "Ref": "UserPool"
+        },
+        "GenerateSecret": false,
+        "ExplicitAuthFlows": [
+          "ALLOW_USER_PASSWORD_AUTH",
+          "ALLOW_USER_SRP_AUTH",
+          "ALLOW_REFRESH_TOKEN_AUTH"
+        ]
+      }
+    },
+    "ApiAuthorizer": {
+      "Type": "AWS::ApiGateway::Authorizer",
+      "Condition": "CognitoEnabled",
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${ProjectName}-cognito-authorizer"
+        },
+        "RestApiId": {
+          "Ref": "RestApi"
+        },
+        "Type": "COGNITO_USER_POOLS",
+        "IdentitySource": "method.request.header.Authorization",
+        "ProviderARNs": [
+          {
+            "Fn::GetAtt": [
+              "UserPool",
+              "Arn"
+            ]
+          }
+        ]
+      }
+    },
+    "GuiBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": {
+          "Fn::Sub": "${ProjectName}-gui-${AWS::AccountId}"
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "GuiOriginAccessControl": {
+      "Type": "AWS::CloudFront::OriginAccessControl",
+      "Properties": {
+        "OriginAccessControlConfig": {
+          "Name": {
+            "Fn::Sub": "${ProjectName}-gui-oac"
+          },
+          "OriginAccessControlOriginType": "s3",
+          "SigningBehavior": "always",
+          "SigningProtocol": "sigv4"
+        }
+      }
+    },
+    "GuiDistribution": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Comment": {
+            "Fn::Sub": "${ProjectName} GUI"
+          },
+          "Enabled": true,
+          "DefaultRootObject": "index.html",
+          "Origins": [
+            {
+              "Id": "gui-s3-origin",
+              "DomainName": {
+                "Fn::GetAtt": [
+                  "GuiBucket",
+                  "RegionalDomainName"
+                ]
+              },
+              "S3OriginConfig": {
+                "OriginAccessIdentity": ""
+              },
+              "OriginAccessControlId": {
+                "Fn::GetAtt": [
+                  "GuiOriginAccessControl",
+                  "Id"
+                ]
+              }
+            }
+          ],
+          "DefaultCacheBehavior": {
+            "TargetOriginId": "gui-s3-origin",
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": [
+              "GET",
+              "HEAD",
+              "OPTIONS"
+            ],
+            "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6"
+          },
+          "CustomErrorResponses": [
+            {
+              "ErrorCode": 403,
+              "ResponseCode": 200,
+              "ResponsePagePath": "/index.html"
+            },
+            {
+              "ErrorCode": 404,
+              "ResponseCode": 200,
+              "ResponsePagePath": "/index.html"
+            }
+          ],
+          "PriceClass": "PriceClass_100"
+        }
+      }
+    },
+    "GuiBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "GuiBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowCloudFrontRead",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "cloudfront.amazonaws.com"
+              },
+              "Action": "s3:GetObject",
+              "Resource": {
+                "Fn::Sub": "arn:aws:s3:::${ProjectName}-gui-${AWS::AccountId}/*"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "AWS:SourceArn": {
+                    "Fn::Sub": "arn:aws:cloudfront::${AWS::AccountId}:distribution/${GuiDistribution}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ApiUsagePlan": {
+      "Type": "AWS::ApiGateway::UsagePlan",
+      "Condition": "ApiKeyRequired",
+      "DependsOn": [
+        "ApiDeploymentAuth"
+      ],
+      "Properties": {
+        "UsagePlanName": {
+          "Fn::Sub": "${ProjectName}-usage-plan"
+        },
+        "ApiStages": [
+          {
+            "ApiId": {
+              "Ref": "RestApi"
+            },
+            "Stage": "prod"
+          }
+        ],
+        "Throttle": {
+          "RateLimit": 10,
+          "BurstLimit": 20
+        }
+      }
+    },
+    "ApiKey": {
+      "Type": "AWS::ApiGateway::ApiKey",
+      "Condition": "ApiKeyRequired",
+      "DependsOn": [
+        "ApiDeploymentAuth"
+      ],
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${ProjectName}-api-key"
+        },
+        "Enabled": true
+      }
+    },
+    "ApiUsagePlanKey": {
+      "Type": "AWS::ApiGateway::UsagePlanKey",
+      "Condition": "ApiKeyRequired",
+      "Properties": {
+        "KeyId": {
+          "Ref": "ApiKey"
+        },
+        "KeyType": "API_KEY",
+        "UsagePlanId": {
+          "Ref": "ApiUsagePlan"
+        }
+      }
+    },
+    "Fn::ForEach::BedrockAccess": [
+      "ModelId",
+      {
+        "Ref": "BedrockModelIds"
+      },
+      {
+        "BedrockInvoke&{ModelId}": {
+          "Type": "AWS::IAM::ManagedPolicy",
+          "Properties": {
+            "Description": "Allows bedrock:InvokeModel on one allowed inference profile and its foundation model (generated from the BedrockModelIds parameter).",
+            "Roles": [
+              {
+                "Ref": "PipelineExecutionRole"
+              }
+            ],
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "InvokeProfileAndFoundationModel",
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:InvokeModel"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}"
+                    },
+                    {
+                      "Fn::Sub": [
+                        "arn:aws:bedrock:*::foundation-model/${Provider}.${Model}",
+                        {
+                          "Provider": {
+                            "Fn::Select": [
+                              1,
+                              {
+                                "Fn::Split": [
+                                  ".",
+                                  "${ModelId}"
+                                ]
+                              }
+                            ]
+                          },
+                          "Model": {
+                            "Fn::Select": [
+                              2,
+                              {
+                                "Fn::Split": [
+                                  ".",
+                                  "${ModelId}"
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
   },
   "Outputs": {
     "InputBucketName": {
       "Description": "Reviews JSON is written here (under sample/) by the generate action.",
-      "Value": { "Ref": "InputBucket" }
+      "Value": {
+        "Ref": "InputBucket"
+      }
     },
     "OutputBucketName": {
       "Description": "Surfaced results and run_summary.json land here. Set this as OUTPUT_BUCKET for the local control plane.",
-      "Value": { "Ref": "OutputBucket" }
+      "Value": {
+        "Ref": "OutputBucket"
+      }
     },
     "FunctionName": {
       "Description": "The pipeline Lambda function name. Set this as PIPELINE_FUNCTION for the local control plane.",
-      "Value": { "Ref": "PipelineFunction" }
+      "Value": {
+        "Ref": "PipelineFunction"
+      }
+    },
+    "ApiBaseUrl": {
+      "Description": "API Gateway base URL. Point the GUI at this (VITE_API_BASE) to run everything server-side. Append /generate, /process, /results, /summary.",
+      "Value": {
+        "Fn::Sub": "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+      }
+    },
+    "UserPoolId": {
+      "Condition": "CognitoEnabled",
+      "Description": "Cognito user pool id (GUI login).",
+      "Value": {
+        "Ref": "UserPool"
+      }
+    },
+    "UserPoolClientId": {
+      "Condition": "CognitoEnabled",
+      "Description": "Cognito app client id (GUI login).",
+      "Value": {
+        "Ref": "UserPoolClient"
+      }
+    },
+    "GuiBucketName": {
+      "Description": "S3 bucket that holds the built GUI (synced by the deploy script).",
+      "Value": {
+        "Ref": "GuiBucket"
+      }
+    },
+    "GuiUrl": {
+      "Description": "CloudFront URL for the GUI. This is the default way to use the app.",
+      "Value": {
+        "Fn::Sub": "https://${GuiDistribution.DomainName}"
+      }
+    }
+  },
+  "Mappings": {
+    "Cors": {
+      "Default": {
+        "Origin": "*",
+        "Headers": "Content-Type,X-Api-Key,Authorization",
+        "Methods": "GET,POST,OPTIONS"
+      }
     }
   }
 }

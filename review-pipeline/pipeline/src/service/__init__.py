@@ -6,7 +6,8 @@ The only layer that knows the full translate -> summarize -> translate flow.
 """
 
 from .pipeline_service import PipelineService
+from .job_service import JobService
 from .synthetic import generate_reviews
 from . import quality_scorer
 
-__all__ = ["PipelineService", "generate_reviews", "quality_scorer"]
+__all__ = ["JobService", "PipelineService", "generate_reviews", "quality_scorer"]

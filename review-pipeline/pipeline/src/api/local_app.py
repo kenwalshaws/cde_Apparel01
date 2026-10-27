@@ -2,47 +2,48 @@
 # SPDX-License-Identifier: Apache-2.0
 """Local control plane backing the TypeScript GUI.
 
-api layer: a thin HTTP surface that lets the local GUI drive the *deployed*
-AWS backend. It runs on your machine with your AWS credentials and does three
-things on the GUI's behalf:
+api layer: a thin HTTP surface that lets a locally running GUI drive the
+*deployed* AWS backend. It runs on your machine with your AWS credentials and
+forwards each request to the deployed Lambda:
 
-  - generate : invoke the deployed Lambda with action "generate" (the Lambda
-               builds the synthetic corpus and uploads it to the input bucket)
-  - process  : invoke the deployed Lambda with action "process" (the Lambda
-               runs the translate/summarize/score pipeline, writing results to
-               the output bucket)
-  - results  : read surfaced result files from the output bucket
-  - summary  : read run_summary.json from the output bucket
+  - POST /generate  : Lambda action "generate" (builds the synthetic corpus and
+                      uploads it to the input bucket)
+  - POST /run       : Lambda action "process" (starts an asynchronous job and
+                      returns its jobnum)
+  - GET  /jobs      : Lambda action "jobs" (job ids, newest first)
+  - GET  /job/{id}  : Lambda action "job" (one job's inputs, results, summary)
+  - GET  /health    : the configuration this service is running with
 
-The browser never holds AWS credentials or talks to AWS directly — it only
-calls this local service over /api.
+The browser never holds AWS credentials or talks to AWS directly. AWS error
+details are logged here and are not returned to the browser.
 
 Run (from the `pipeline/` directory, with AWS creds + the stack deployed):
     PIPELINE_FUNCTION=review-pipeline-processor \
-    OUTPUT_BUCKET=review-pipeline-output-<account-id> \
     AWS_REGION=us-east-1 \
-    uvicorn src.api.local_app:app --reload --port 8000
+    uvicorn src.api.local_app:app --reload
 
 Environment variables:
     PIPELINE_FUNCTION  (required)  deployed Lambda function name
-    OUTPUT_BUCKET      (required)  output bucket to read results from
+    OUTPUT_BUCKET      (optional)  shown by /health only
     AWS_REGION         (optional)  defaults to us-east-1
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 _REGION = os.environ.get("AWS_REGION", "us-east-1")
+logger = logging.getLogger("review_pipeline.local_app")
 _lambda = boto3.client("lambda", region_name=_REGION)
-_s3 = boto3.client("s3", region_name=_REGION)
 
 
 def _function_name() -> str:
@@ -55,23 +56,43 @@ def _function_name() -> str:
     return name
 
 
-def _output_bucket() -> str:
-    bucket = os.environ.get("OUTPUT_BUCKET")
-    if not bucket:
-        raise HTTPException(status_code=500, detail="OUTPUT_BUCKET env var is not set.")
-    return bucket
-
-
 def _invoke_lambda(payload: dict[str, Any]) -> dict[str, Any]:
     """Synchronously invoke the deployed Lambda and parse its response."""
-    resp = _lambda.invoke(
-        FunctionName=_function_name(),
-        InvocationType="RequestResponse",
-        Payload=json.dumps(payload).encode("utf-8"),
-    )
+    function = _function_name()
+    try:
+        resp = _lambda.invoke(
+            FunctionName=function,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+    except NoCredentialsError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="No AWS credentials found for the control plane. "
+            "Set them in the shell before starting uvicorn.",
+        ) from exc
+    except ClientError as exc:
+        # Keep the AWS error (it can name the function, region and account)
+        # in this process's log; return only the error code to the browser.
+        err = exc.response.get("Error", {})
+        code = err.get("Code", "ClientError")
+        logger.error("Lambda invoke failed (%s): %s", code, err.get("Message", exc))
+        raise HTTPException(
+            status_code=502, detail=f"pipeline invocation failed ({code}); see the server log"
+        ) from exc
+    except BotoCoreError as exc:
+        logger.error("AWS SDK error invoking the pipeline: %s", exc)
+        raise HTTPException(
+            status_code=502, detail="pipeline invocation failed; see the server log"
+        ) from exc
+
     raw = resp["Payload"].read()
     if resp.get("FunctionError"):
-        raise HTTPException(status_code=502, detail=f"Lambda error: {raw.decode('utf-8')}")
+        # The payload holds errorMessage and a stack trace: log it, do not return it.
+        logger.error("Lambda function error: %s", raw.decode("utf-8", errors="replace"))
+        raise HTTPException(
+            status_code=502, detail="pipeline function error; see the server log"
+        )
 
     outer = json.loads(raw) if raw else {}
     # The handler returns {"statusCode": ..., "body": "<json string>"}.
@@ -102,7 +123,8 @@ class GenerateRequest(BaseModel):
 
 class ProcessRequest(BaseModel):
     input_key: str = "sample/reviews.json"
-    targets: list[str] = ["fr", "de"]
+    # Not forwarded to the Lambda; targets come from config.json there.
+    targets: list[str] | None = None
 
 
 @app.get("/health")
@@ -125,35 +147,17 @@ def generate(req: GenerateRequest) -> dict[str, Any]:
 
 @app.post("/run")
 def run(req: ProcessRequest) -> dict[str, Any]:
-    """Ask the deployed Lambda to process the corpus for the target languages."""
-    return _invoke_lambda(
-        {"action": "process", "input_key": req.input_key, "targets": req.targets}
-    )
+    """Ask the deployed Lambda to run a job over the corpus. Returns the job summary."""
+    return _invoke_lambda({"action": "process", "input_key": req.input_key})
 
 
-@app.get("/results")
-def results(lang: str | None = None) -> list[dict[str, Any]]:
-    """Read surfaced result files from the output bucket, optionally by language."""
-    bucket = _output_bucket()
-    prefix = f"translated_summaries/{lang}/" if lang else "translated_summaries/"
-
-    out: list[dict[str, Any]] = []
-    paginator = _s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith(".json"):
-                continue
-            body = _s3.get_object(Bucket=bucket, Key=key)["Body"].read()
-            out.append(json.loads(body))
-    return out
+@app.get("/jobs")
+def jobs() -> dict[str, Any]:
+    """List job ids (newest first)."""
+    return _invoke_lambda({"action": "jobs"})
 
 
-@app.get("/summary")
-def summary() -> dict[str, Any]:
-    bucket = _output_bucket()
-    try:
-        body = _s3.get_object(Bucket=bucket, Key="run_summary.json")["Body"].read()
-    except _s3.exceptions.NoSuchKey:
-        raise HTTPException(status_code=404, detail="no run summary yet; run the pipeline first")
-    return json.loads(body)
+@app.get("/job/{jobnum}")
+def job(jobnum: str) -> dict[str, Any]:
+    """Return one job's inputs, results, and summary."""
+    return _invoke_lambda({"action": "job", "jobnum": jobnum})
