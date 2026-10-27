@@ -10,9 +10,10 @@ export interface ResultRow {
   product_name: string;
   english_review: string;
   english_summary: string;
-  de_summary: string;
-  fr_summary: string;
   surfaced: boolean;
+  // One `<code>_summary` field per target language (e.g. de_summary), driven
+  // by config.json `target_languages`. Read these dynamically.
+  [translation: `${string}_summary`]: string | undefined;
 }
 
 // One review in a job's inputs/samples.json.
@@ -36,6 +37,8 @@ export interface JobSummary {
   surfaced_pct: number;
   elapsed_seconds: number;
   targets: string[];
+  // Display names from config.json `language_labels` (may be missing/partial).
+  target_labels?: Record<string, string>;
   model_id: string;
   created_utc: string;
 }

@@ -10,6 +10,10 @@ Everything runs in AWS. The GUI is served from CloudFront and talks to an
 API Gateway + Lambda backend; a user signs in via Amazon Cognito. Non-production,
 synthetic (no-PII) data only.
 
+Working on this code, or pointing a coding agent at it? Start with
+[`AGENTS.md`](AGENTS.md) (commands, conventions, boundaries) and
+[`docs/decisions.md`](docs/decisions.md) (why it is built this way).
+
 ---
 
 ## Architecture
@@ -29,7 +33,8 @@ Amazon API Gateway  ──(Cognito authorizer)──►  Lambda (pipeline)
       │  generate ─► synthesize reviews ─────────► input bucket
       │  process  ─► create jobnum, snapshot input, async self-invoke,
       │              return jobnum immediately
-      │                 └─ worker: summarize (Bedrock) → translate de+fr
+      │                 └─ worker: read config.json (model, target languages)
+      │                    summarize (Bedrock) → translate each target
       │                    (Amazon Translate) → score → write results
       ▼                                            ▼
    output bucket:  jobs/<jobnum>/inputs/samples.json
@@ -40,7 +45,8 @@ Amazon API Gateway  ──(Cognito authorizer)──►  Lambda (pipeline)
 Per review the pipeline does:
 
 1. **Summarize** the English review into 1–2 sentences (Amazon Bedrock).
-2. **Translate** that summary into **de** and **fr** (Amazon Translate).
+2. **Translate** that summary into each target language (Amazon Translate;
+   `target_languages` in `config.json`, default **de** and **fr**).
 3. **Quality-score** the summary and each translation; a review is "surfaced"
    only if every step passes the threshold (default 0.7).
 
@@ -72,10 +78,12 @@ review-pipeline/
 ├── pipeline/                         # Python — core pipeline
 │   ├── src/
 │   │   ├── model/                    # dataclasses: Review, StepResult, PipelineResult
-│   │   ├── client/                   # thin AWS SDK wrappers (Translate, Bedrock)
-│   │   ├── service/                  # orchestration, quality scoring, synthetic data
+│   │   ├── client/                   # thin AWS SDK wrappers (Translate, Bedrock, S3 job store)
+│   │   ├── service/                  # pipeline + job orchestration, quality scoring, synthetic data
 │   │   ├── api/                      # Lambda handler + optional local control plane
 │   │   ├── config.py                 # static settings + config.json resolution
+│   │   ├── errors.py                 # UserFacingError (messages safe to return to callers)
+│   │   ├── factory.py                # wires clients and services together
 │   │   └── debug.py                  # debug-logging toggle (from config.json)
 │   ├── scripts/                      # generate_synthetic.py, run_local.py (offline aids)
 │   ├── tests/                        # unit + integration (no AWS)
@@ -90,13 +98,17 @@ review-pipeline/
 ```
 
 - **model** — plain data structures, no logic, no dependencies.
-- **client** — one wrapper per AWS service (Translate, Bedrock). Knows nothing
+- **client** — one wrapper per AWS service (Translate, Bedrock) plus `JobStore`,
+  the only code that reads and writes job data in S3. Knows nothing
   about the pipeline. The Bedrock client auto-detects Claude vs. Amazon Nova
   request/response shapes.
-- **service** — orchestration, quality scoring, and synthetic data generation.
-  The only layer that knows the full flow.
-- **api** — thin adapters. `lambda_handler.py` runs in AWS and routes the
-  actions (generate / process / _worker / jobs / job). `local_app.py` is an
+- **service** — `PipelineService` (summarize once, translate per target, score),
+  `JobService` (create, run, list and read jobs through `JobStore`), quality
+  scoring, and synthetic data generation. The only layer that knows the full
+  flow; it makes no AWS calls itself.
+- **api** — thin adapters. `lambda_handler.py` runs in AWS, normalizes the
+  event, routes the actions (generate / process / _worker / jobs / job) to
+  `JobService`, and wraps the response. `local_app.py` is an
   optional local control plane that proxies to the same Lambda (for running the
   GUI locally instead of from CloudFront).
 
@@ -109,6 +121,14 @@ editing it in S3:
 - `default_model` — the Bedrock model/inference-profile id to use. Options are
   listed under `models` (Claude Haiku 5.5 US/global, Amazon Nova 2 Lite).
 - `debug` — `true` (default) emits verbose debug logging to CloudWatch.
+- `target_languages` — Amazon Translate codes to translate each summary into
+  (default `["de", "fr"]`). See "Extending: more target languages".
+- `language_labels` — optional display names for the GUI, e.g.
+  `{"de": "German"}`.
+
+> `deploy.sh` re-seeds this file from `infrastructure/config.json` on every
+> run. Edits made directly in S3 take effect immediately but are overwritten
+> by the next deploy, so make lasting edits in the repo file.
 
 > Claude and Nova models on the `bedrock-runtime` endpoint require a geo/global
 > **inference profile id** (e.g. `us.anthropic.claude-haiku-5-5`), not a bare
@@ -118,7 +138,7 @@ editing it in S3:
 
 ## Prerequisites
 
-- Python 3.12, Node 18+, npm, AWS CLI
+- Python 3.12, Node 20.19+ or 22.12+ (required by Vite 7), npm, AWS CLI
 - AWS credentials in your environment (env vars, profile, or SSO)
 - **Bedrock model access enabled** for the summarization model
   (`us.anthropic.claude-haiku-5-5` by default) in your deploy region
@@ -198,11 +218,14 @@ user pool + login user, the S3 buckets, and the CloudFront-hosted GUI.
 
 ```bash
 export REGION=us-east-1
-bash infrastructure/deploy.sh you@example.com
+bash infrastructure/deploy.sh first-admin@example.com
 ```
 
-Pass the Cognito login user's email as the first argument (or set
-`GUI_USER_EMAIL`). Cognito emails that address a one-time temporary password.
+Pass the **first administrator's email** as the first argument (or set
+`GUI_USER_EMAIL`). That address becomes the first user the deploy creates, and
+Cognito emails it a one-time temporary password, so it must be a mailbox the
+administrator can read. If you omit it, the script falls back to the engagement
+owner's address, so always pass your own.
 
 - `REGION` should be the region where you enabled Bedrock model access.
 - No bucket to pre-create — the script derives and creates an account-scoped
@@ -244,8 +267,8 @@ An **activity log** at the bottom of the GUI shows which step is running.
 | `REGION` | CLI default → us-east-1 | Deploy region (match Bedrock access) |
 | `API_AUTH` | `COGNITO` | `COGNITO`, `API_KEY`, or `NONE` (open; PoC only) |
 | `ENABLE_S3_TRIGGER` | `false` | `true` lets input uploads auto-run a job |
-| `BEDROCK_MODEL_ID` | Claude Haiku 5.5 | Fallback model when config.json is absent |
-| `GUI_USER_EMAIL` | kenwalsh+cdejump@amazon.com | Cognito login user (emailed the temp password). Can also be the first positional arg. |
+| `BEDROCK_MODEL_IDS` | `models` list in `infrastructure/config.json` | Comma-separated inference profile IDs the Lambda role may invoke (default model first; also the fallback if config.json is absent). Normally leave unset so `config.json` stays the single source of truth |
+| `GUI_USER_EMAIL` | engagement owner's address | Email of the **first administrator**: the one Cognito user the deploy creates, emailed the temporary password. Always pass your own, as the first positional argument or this variable. |
 | `CODE_BUCKET` | account-scoped | Bucket that holds the Lambda zip |
 
 > **Email delivery (temporary password).** The user pool uses Cognito's default
@@ -257,6 +280,111 @@ An **activity log** at the bottom of the GUI shows which step is running.
 > On re-deploy the script re-sends the invite; this only works while the user
 > has not yet set a permanent password. If they have, use the GUI's reset flow
 > or delete the user and re-deploy.
+
+### Adding more users
+
+The user pool is admin-create-only (no self sign-up), and there is a single
+access level. Add users in the Cognito console, or with the CLI (take the
+pool ID from the stack outputs):
+
+```bash
+aws cognito-idp admin-create-user \
+  --user-pool-id <UserPoolId> --username new.user@example.com \
+  --user-attributes Name=email,Value=new.user@example.com Name=email_verified,Value=true \
+  --region us-east-1
+```
+
+Cognito emails the temporary password; the GUI prompts for a new one at
+first sign-in.
+
+---
+
+## Input review format
+
+The pipeline reads a **JSON array** of review objects from
+`s3://review-pipeline-input-<account-id>/sample/reviews.json` (the default
+`input_key`).
+
+| Field | Required | Notes |
+|---|---|---|
+| `review_id` | yes | Unique identifier for the review |
+| `product` | yes | Product label |
+| `source_language` | yes | Must be present, but currently unused: text is treated as English |
+| `rating` | yes | Integer (values are coerced with `int()`) |
+| `text` | yes | The English review body (the generator makes 5-8 sentences) |
+| `date` | yes | Date string, e.g. `2026-10-01` |
+| `product_id` | no | Defaults to empty; the generator makes it unique per review |
+| `product_name` | no | Defaults to empty |
+
+Unknown keys are ignored and are not copied to the results.
+
+```json
+[
+  {
+    "review_id": "r-0001",
+    "product_id": "P-1001",
+    "product_name": "Classic Oxford Shirt",
+    "product": "Shirt",
+    "source_language": "en",
+    "rating": 4,
+    "text": "The fabric feels great. It fits true to size. Shipping was quick. The color matches the photos. Stitching looks durable. I would buy it again.",
+    "date": "2026-10-01"
+  }
+]
+```
+
+Notes:
+
+- A missing required field or a non-integer `rating` makes the job fail with an
+  `error` status whose message names the review and the field.
+- **Generate** overwrites `sample/reviews.json`. After uploading your own
+  file, use **Process only** so it is not replaced.
+- If the stack was deployed with `ENABLE_S3_TRIGGER=true`, uploading a
+  `sample/*.json` file starts a job automatically.
+- Reviews are processed sequentially inside the 10-minute Lambda limit, so
+  keep files to roughly a few hundred reviews.
+- Source reviews must be English. Use synthetic or de-identified data only (no PII).
+
+---
+
+## Extending: more target languages
+
+Target languages are configuration, not code. Edit `target_languages` (and
+optionally `language_labels`) in `infrastructure/config.json`:
+
+```json
+"target_languages": ["de", "fr", "es", "ja"],
+"language_labels": { "de": "German", "fr": "French", "es": "Spanish", "ja": "Japanese" }
+```
+
+No code change is needed: the pipeline writes one `<code>_summary` field per
+language and the GUI draws one tile per language found in each result row.
+Amazon Translate IAM is not language-specific.
+
+To apply the change:
+
+- **Lasting:** edit the repo file and run
+  `bash infrastructure/deploy.sh <first admin email>` (this re-seeds
+  `config.json` to the input bucket).
+- **Quick trial:** edit `config.json` in the input bucket. The next job picks
+  it up with no redeploy, but the next deploy overwrites it.
+
+Rules, checked when a job starts (a violation marks the job `error` with a
+clear message in its `status.json`):
+
+- Codes must be a non-empty list of Translate codes (`es`, `zh-TW`, `fr-CA`).
+- `en` is rejected: source reviews are English.
+- Duplicates are dropped.
+- A job whose `config.json` is missing or unreadable uses the built-in default
+  (`de`, `fr`).
+
+Old jobs keep displaying correctly because each result row carries its own
+language fields.
+
+Use language codes from the
+[Amazon Translate supported languages](https://docs.aws.amazon.com/translate/latest/dg/what-is-languages.html)
+list. Each added language adds one Translate call per review, so job time
+and cost grow roughly linearly; watch the 10-minute Lambda limit for large files.
 
 ---
 
@@ -284,6 +412,70 @@ Unit + integration tests run without AWS (clients are faked). Config comes from
 cd pipeline
 ../.venv/bin/pytest        # add -v for per-test output
 ```
+
+Coverage: the scorer, the data model, the pipeline service, the Bedrock
+client (Claude and Nova request/response shapes) and the Lambda router
+(action routing, CORS, error handling, async dispatch). Not covered: the
+CloudFormation template and shell scripts (only `bash -n` and JSON validity
+checks), the GUI, and real AWS calls.
+
+---
+
+## How scoring works
+
+Each English summary and each translation gets a score from 0.0 to 1.0. A row
+is `surfaced` only if every step scores at or above `QUALITY_THRESHOLD`
+(default `0.7`). The heuristics live in
+`pipeline/src/service/quality_scorer.py` and are deliberately simple so a
+customer team can tune or replace them.
+
+| Step | Dimensions (score is their mean) |
+|---|---|
+| Summary | length within 40-320 characters; 1-2 sentences; not a copy of the review |
+| Translation | Translate saw the declared source language ("en"); output is not identical to the input |
+
+Empty output scores 0.0. Amazon Translate reports the language of its
+**input**, not its output, so the translation score cannot confirm the output
+is really German or French. It catches empty output, untranslated echoes and
+unexpected source languages. Verifying the output language would need a
+language-detection call (for example Amazon Comprehend) and is a listed
+extension, not a current feature.
+
+---
+
+## Operate and troubleshoot
+
+| Symptom | Likely cause and fix |
+|---|---|
+| GUI login fails or no email arrives | Check spam; the invite is sent once per new user. Re-run `deploy.sh` to resend while the password is still temporary |
+| Process returns a 400 or the job shows `error` with a message about a review | Input JSON is missing a required field or has a bad value (see Input review format); the message names the review |
+| Job stays `running` | Check the Lambda log group `/aws/lambda/<function name>`; a job over the 10-minute limit is killed and stays `running` (use a smaller file) |
+| Job shows `error` | `status.json` holds a short message. Messages about config or input are specific; anything else says `internal error (<type>)` and the full traceback is only in the Lambda logs. A 500 response carries a `request_id` you can search for in the logs |
+| Bedrock `AccessDenied` or model-not-found | Model access is not enabled in the account/Region, or `config.json` names a model not in the IAM policy |
+| Bedrock `ValidationException` about a parameter | The model rejects a request field (Claude Haiku 5.5 rejects `temperature`); edit `client/bedrock_client.py` |
+| Browser shows a CORS error | Usually a 5xx hidden behind it; read the Lambda log for the real error |
+| GUI changes not visible | Re-run `deploy.sh` (builds, syncs and invalidates CloudFront) and hard-refresh |
+| Many rows show "below threshold" | Compare scores against the table above; lower `QUALITY_THRESHOLD` only after reading the rows |
+
+Debug output: set the debug flag in `config.json` (input bucket); it takes
+effect on the next invocation with no redeploy.
+
+---
+
+## Results against success criteria
+
+This PoC has been deployed and the end-to-end flow verified by the engineer who
+built it (generate, process, view in the GUI). **Formal measurements have not
+been recorded.** The customer team should capture these before relying on the
+output:
+
+| Criterion | How to measure | Recorded result |
+|---|---|---|
+| Translation accuracy | Have native speakers rate a sample of 30-50 `de` and `fr` summaries | Not yet measured |
+| Summary faithfulness | Compare sample summaries to the source reviews | Not yet measured |
+| Surfaced rate | `surfaced_pct` in a job's `summary.json` | Not yet recorded |
+| Latency | `elapsed_seconds` in `summary.json` (whole job); divide by review count | Not yet recorded |
+| Cost | Bedrock token counts plus Translate characters per job | Not yet recorded |
 
 ## Optional: offline local run
 
@@ -320,10 +512,15 @@ knowing:
 - **Bedrock access is scoped to the models in `config.json`.** The Lambda role
   may invoke only Claude Haiku 5.5 (US and global inference profiles) and Nova 2
   Lite. Foundation-model ARNs keep a region wildcard because cross-Region
-  inference profiles route to other Regions. **To enable another model, add it
-  to `infrastructure/config.json` and to the `Bedrock` statement in
-  `infrastructure/template.json`, then redeploy** — selecting an unlisted model
-  in `config.json` alone fails with an access-denied error by design.
+  inference profiles route to other Regions. **To enable another model, add its
+  inference profile ID (geo.provider.model form, for example
+  `us.anthropic.claude-haiku-5-5`) to the `models` list in
+  `infrastructure/config.json` and re-run `deploy.sh`.** The deploy copies that
+  list into the template's `BedrockModelIds` parameter, and a loop in
+  `infrastructure/template.json` creates one IAM policy per listed profile (and
+  its foundation model). Do not edit the generated policies by hand. Editing
+  `config.json` in S3 without redeploying lets you select a listed model, but a
+  model that was never deployed fails with an access-denied error by design.
 - **Translate uses `Resource: "*"` with a Region condition.** Amazon Translate
   text translation has no resource-level permissions to scope to, so the role
   is limited to the single action `translate:TranslateText` in the deploy
@@ -344,6 +541,9 @@ knowing:
 synthetic data, quality evaluation, Cognito-protected GUI on CloudFront, IaC
 the customer's team can adapt.
 
+The original scoping discussion considered more source languages; this PoC
+narrowed to English source reviews (see `docs/decisions.md`, ADR 7).
+
 **Out of scope:** PDP redesign, real reviewer PII, production deployment and
 hardening, languages beyond German and French. These are separate workstreams
 owned by the customer's team.
@@ -355,4 +555,4 @@ This documentation is licensed under the Creative Commons Attribution 4.0
 International License (CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
 
 Source code in this project is licensed under the Apache License 2.0; see the
-repository-root `LICENSE` file.
+`LICENSE` file in this directory (a copy also sits at the repository root).

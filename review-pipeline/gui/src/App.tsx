@@ -98,13 +98,17 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
     const id = setInterval(
       () => {
         pushLog("Auto-refresh (2 min)…");
-        void fetchJobs()
-          .then(setJobs)
-          .catch(() => {});
+        // Background refresh: no spinner and no error banner (it would flash
+        // over whatever the user is doing), but a failure is still logged so an
+        // expired session or an API outage is visible in the activity log.
+        const logFailure = (what: string) => (e: unknown) =>
+          pushLog(
+            `Auto-refresh of ${what} failed: ${e instanceof Error ? e.message : String(e)}`,
+            "error"
+          );
+        void fetchJobs().then(setJobs).catch(logFailure("the job list"));
         if (selected) {
-          void fetchJob(selected)
-            .then(setJob)
-            .catch(() => {});
+          void fetchJob(selected).then(setJob).catch(logFailure(`job ${selected}`));
         }
       },
       2 * 60 * 1000
@@ -186,7 +190,7 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
         <div>
           <h1 style={{ margin: 0, fontSize: 24 }}>Review Translate-and-Summarize</h1>
           <p style={{ color: "#6b7280", marginTop: 6 }}>
-            English reviews → English summary → German &amp; French translations.
+            English reviews → English summary → translations in the configured languages.
             Each run is a job; browse jobs and inspect inputs and results.
           </p>
         </div>
@@ -295,7 +299,11 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
                 ) : (
                   <div style={{ display: "grid", gap: 14 }}>
                     {job.results.map((r) => (
-                      <JobResultCard key={r.review_id} row={r} />
+                      <JobResultCard
+                        key={r.review_id}
+                        row={r}
+                        labels={job.summary.target_labels}
+                      />
                     ))}
                   </div>
                 )

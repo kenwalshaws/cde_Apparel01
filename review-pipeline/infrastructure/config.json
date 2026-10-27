@@ -1,6 +1,11 @@
 {
-  "_comment": "Runtime configuration for the review pipeline. The Lambda reads this file from the input bucket (key: config.json) on each run. Edit it in S3 to change behavior without redeploying. 'default_model' must be one of the ids under 'models'. 'debug' toggles verbose debug logging (CloudWatch).",
+  "_comment": "Runtime configuration for the review pipeline. The Lambda reads this file from the input bucket (key: config.json) on each run. Edit it in S3 to change behavior without redeploying. 'default_model' must be one of the ids under 'models'. 'debug' toggles verbose debug logging (CloudWatch). 'target_languages' lists the Amazon Translate codes to translate each summary into (not 'en'; source reviews stay English). 'language_labels' maps a code to the name the GUI shows (optional; the GUI falls back to the code). Note: deploy.sh re-seeds this file, so edits made directly in S3 are overwritten on the next deploy; make lasting edits here.",
   "debug": true,
+  "target_languages": ["de", "fr"],
+  "language_labels": {
+    "de": "German",
+    "fr": "French"
+  },
   "default_model": "us.anthropic.claude-haiku-5-5",
   "models": [
     {

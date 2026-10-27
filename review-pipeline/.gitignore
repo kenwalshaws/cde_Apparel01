@@ -12,8 +12,8 @@ pipeline.zip
 # TypeScript incremental build cache
 gui/*.tsbuildinfo
 
-# Safety net: never commit anything under a .secrets dir (deploy prints the
-# one-time temporary password to the terminal; it is not written to disk).
+# Safety net: never commit anything under a .secrets dir. The pipeline writes
+# no secrets to disk (Cognito emails the one-time temporary password).
 .secrets/
 
 # GUI env files written by deploy (contain API/auth config)
@@ -32,4 +32,9 @@ data/
 .DS_Store
 
 # Security scanner output (generated per scan)
+.protoshield/
+
+# Scanner state and reports (local only)
+.holmes/
+holmes-report-*.json
 .protoshield/
