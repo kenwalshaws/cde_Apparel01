@@ -1,5 +1,6 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
+  "Transform": "AWS::LanguageExtensions",
   "Description": "Review translate-and-summarize pipeline (proof of concept). Deploys a Lambda that generates synthetic reviews, and translates/summarizes/scores them with Amazon Translate and Amazon Bedrock, writing results to an output bucket. The GUI drives it via explicit Lambda invokes; the S3 object-created trigger is optional and OFF by default.",
   "Parameters": {
     "ProjectName": {
@@ -16,10 +17,10 @@
       "Default": "lambda/pipeline.zip",
       "Description": "S3 key of the packaged Lambda deployment zip."
     },
-    "BedrockModelId": {
-      "Type": "String",
-      "Default": "us.anthropic.claude-haiku-5-5",
-      "Description": "Bedrock inference profile ID used for summarization. Current Claude models on the bedrock-runtime endpoint require a cross-Region inference profile ID (geo prefix us./eu./au./jp./in. or global.), not a bare foundation-model id. Match the prefix to your deploy region."
+    "BedrockModelIds": {
+      "Type": "CommaDelimitedList",
+      "Default": "us.anthropic.claude-haiku-5-5,global.anthropic.claude-haiku-5-5,us.amazon.nova-2-lite-v1:0",
+      "Description": "Allowed Bedrock inference profile IDs (geo.provider.model form, for example us.anthropic.claude-haiku-5-5). The Lambda role may invoke exactly these profiles and their underlying foundation models; the first one is the fallback model. deploy.sh fills this from the models list in infrastructure/config.json, so that file is the single source of truth. Match the geo prefix to your deploy Region."
     },
     "QualityThreshold": {
       "Type": "String",
@@ -229,26 +230,6 @@
                   }
                 },
                 {
-                  "Sid": "Bedrock",
-                  "Effect": "Allow",
-                  "Action": [
-                    "bedrock:InvokeModel"
-                  ],
-                  "Resource": [
-                    {
-                      "Fn::Sub": "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
-                    },
-                    {
-                      "Fn::Sub": "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/global.anthropic.claude-haiku-5-5"
-                    },
-                    {
-                      "Fn::Sub": "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-2-lite-v1:0"
-                    },
-                    "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-5-5",
-                    "arn:aws:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0"
-                  ]
-                },
-                {
                   "Sid": "SelfInvokeAsyncWorker",
                   "Effect": "Allow",
                   "Action": [
@@ -297,10 +278,36 @@
               "Fn::Sub": "${ProjectName}-output-${AWS::AccountId}"
             },
             "BEDROCK_MODEL_ID": {
-              "Ref": "BedrockModelId"
+              "Fn::Select": [
+                0,
+                {
+                  "Ref": "BedrockModelIds"
+                }
+              ]
             },
             "QUALITY_THRESHOLD": {
               "Ref": "QualityThreshold"
+            },
+            "CORS_ALLOW_ORIGIN": {
+              "Fn::FindInMap": [
+                "Cors",
+                "Default",
+                "Origin"
+              ]
+            },
+            "CORS_ALLOW_HEADERS": {
+              "Fn::FindInMap": [
+                "Cors",
+                "Default",
+                "Headers"
+              ]
+            },
+            "CORS_ALLOW_METHODS": {
+              "Fn::FindInMap": [
+                "Cors",
+                "Default",
+                "Methods"
+              ]
             }
           }
         }
@@ -420,102 +427,48 @@
             {
               "StatusCode": "200",
               "ResponseParameters": {
-                "method.response.header.Access-Control-Allow-Origin": "'*'",
-                "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Api-Key,Authorization'",
-                "method.response.header.Access-Control-Allow-Methods": "'GET,POST,OPTIONS'"
-              },
-              "ResponseTemplates": {
-                "application/json": ""
-              }
-            }
-          ]
-        },
-        "MethodResponses": [
-          {
-            "StatusCode": "200",
-            "ResponseParameters": {
-              "method.response.header.Access-Control-Allow-Origin": true,
-              "method.response.header.Access-Control-Allow-Headers": true,
-              "method.response.header.Access-Control-Allow-Methods": true
-            }
-          }
-        ]
-      }
-    },
-    "ApiRootMethod": {
-      "Type": "AWS::ApiGateway::Method",
-      "Properties": {
-        "RestApiId": {
-          "Ref": "RestApi"
-        },
-        "ResourceId": {
-          "Fn::GetAtt": [
-            "RestApi",
-            "RootResourceId"
-          ]
-        },
-        "HttpMethod": "ANY",
-        "ApiKeyRequired": {
-          "Fn::If": [
-            "ApiKeyRequired",
-            true,
-            false
-          ]
-        },
-        "AuthorizationType": {
-          "Fn::If": [
-            "CognitoEnabled",
-            "COGNITO_USER_POOLS",
-            "NONE"
-          ]
-        },
-        "AuthorizerId": {
-          "Fn::If": [
-            "CognitoEnabled",
-            {
-              "Ref": "ApiAuthorizer"
-            },
-            {
-              "Ref": "AWS::NoValue"
-            }
-          ]
-        },
-        "Integration": {
-          "Type": "AWS_PROXY",
-          "IntegrationHttpMethod": "POST",
-          "Uri": {
-            "Fn::Sub": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PipelineFunction.Arn}/invocations"
-          }
-        }
-      }
-    },
-    "ApiRootOptionsMethod": {
-      "Type": "AWS::ApiGateway::Method",
-      "Properties": {
-        "RestApiId": {
-          "Ref": "RestApi"
-        },
-        "ResourceId": {
-          "Fn::GetAtt": [
-            "RestApi",
-            "RootResourceId"
-          ]
-        },
-        "HttpMethod": "OPTIONS",
-        "ApiKeyRequired": false,
-        "AuthorizationType": "NONE",
-        "Integration": {
-          "Type": "MOCK",
-          "RequestTemplates": {
-            "application/json": "{\"statusCode\": 200}"
-          },
-          "IntegrationResponses": [
-            {
-              "StatusCode": "200",
-              "ResponseParameters": {
-                "method.response.header.Access-Control-Allow-Origin": "'*'",
-                "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Api-Key,Authorization'",
-                "method.response.header.Access-Control-Allow-Methods": "'GET,POST,OPTIONS'"
+                "method.response.header.Access-Control-Allow-Origin": {
+                  "Fn::Sub": [
+                    "'${V}'",
+                    {
+                      "V": {
+                        "Fn::FindInMap": [
+                          "Cors",
+                          "Default",
+                          "Origin"
+                        ]
+                      }
+                    }
+                  ]
+                },
+                "method.response.header.Access-Control-Allow-Headers": {
+                  "Fn::Sub": [
+                    "'${V}'",
+                    {
+                      "V": {
+                        "Fn::FindInMap": [
+                          "Cors",
+                          "Default",
+                          "Headers"
+                        ]
+                      }
+                    }
+                  ]
+                },
+                "method.response.header.Access-Control-Allow-Methods": {
+                  "Fn::Sub": [
+                    "'${V}'",
+                    {
+                      "V": {
+                        "Fn::FindInMap": [
+                          "Cors",
+                          "Default",
+                          "Methods"
+                        ]
+                      }
+                    }
+                  ]
+                }
               },
               "ResponseTemplates": {
                 "application/json": ""
@@ -539,9 +492,7 @@
       "Type": "AWS::ApiGateway::Deployment",
       "DependsOn": [
         "ApiProxyMethod",
-        "ApiProxyOptionsMethod",
-        "ApiRootMethod",
-        "ApiRootOptionsMethod"
+        "ApiProxyOptionsMethod"
       ],
       "Properties": {
         "RestApiId": {
@@ -812,7 +763,72 @@
           "Ref": "ApiUsagePlan"
         }
       }
-    }
+    },
+    "Fn::ForEach::BedrockAccess": [
+      "ModelId",
+      {
+        "Ref": "BedrockModelIds"
+      },
+      {
+        "BedrockInvoke&{ModelId}": {
+          "Type": "AWS::IAM::ManagedPolicy",
+          "Properties": {
+            "Description": "Allows bedrock:InvokeModel on one allowed inference profile and its foundation model (generated from the BedrockModelIds parameter).",
+            "Roles": [
+              {
+                "Ref": "PipelineExecutionRole"
+              }
+            ],
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "InvokeProfileAndFoundationModel",
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:InvokeModel"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}"
+                    },
+                    {
+                      "Fn::Sub": [
+                        "arn:aws:bedrock:*::foundation-model/${Provider}.${Model}",
+                        {
+                          "Provider": {
+                            "Fn::Select": [
+                              1,
+                              {
+                                "Fn::Split": [
+                                  ".",
+                                  "${ModelId}"
+                                ]
+                              }
+                            ]
+                          },
+                          "Model": {
+                            "Fn::Select": [
+                              2,
+                              {
+                                "Fn::Split": [
+                                  ".",
+                                  "${ModelId}"
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
   },
   "Outputs": {
     "InputBucketName": {
@@ -863,6 +879,15 @@
       "Description": "CloudFront URL for the GUI. This is the default way to use the app.",
       "Value": {
         "Fn::Sub": "https://${GuiDistribution.DomainName}"
+      }
+    }
+  },
+  "Mappings": {
+    "Cors": {
+      "Default": {
+        "Origin": "*",
+        "Headers": "Content-Type,X-Api-Key,Authorization",
+        "Methods": "GET,POST,OPTIONS"
       }
     }
   }
