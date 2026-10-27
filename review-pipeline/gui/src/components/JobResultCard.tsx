@@ -4,11 +4,22 @@ import type { ResultRow } from "../types";
 
 interface Props {
   row: ResultRow;
+  // Optional code -> display name map (from the job summary).
+  labels?: Record<string, string>;
 }
 
-// A fancy card showing one review end-to-end:
-//   English review  →  English summary  →  German + French translations.
-export function JobResultCard({ row }: Props) {
+// Language codes present in a row: every `<code>_summary` field except the
+// English one, in the order the backend wrote them.
+function translationCodes(row: ResultRow): string[] {
+  return Object.keys(row)
+    .filter((k) => k.endsWith("_summary") && k !== "english_summary")
+    .map((k) => k.slice(0, -"_summary".length));
+}
+
+// A card showing one review end-to-end:
+//   English review  →  English summary  →  one tile per target language.
+export function JobResultCard({ row, labels }: Props) {
+  const codes = translationCodes(row);
   return (
     <article
       style={{
@@ -72,9 +83,20 @@ export function JobResultCard({ row }: Props) {
       </div>
 
       {/* Translations side by side */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        <Translation flag="🇩🇪" lang="German (de)" text={row.de_summary} />
-        <Translation flag="🇫🇷" lang="French (fr)" text={row.fr_summary} />
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+          gap: 12,
+        }}
+      >
+        {codes.map((code) => (
+          <Translation
+            key={code}
+            lang={labels?.[code] ? `${labels[code]} (${code})` : code.toUpperCase()}
+            text={row[`${code}_summary`] ?? ""}
+          />
+        ))}
       </div>
     </article>
   );
@@ -115,7 +137,7 @@ function Section({
   );
 }
 
-function Translation({ flag, lang, text }: { flag: string; lang: string; text: string }) {
+function Translation({ lang, text }: { lang: string; text: string }) {
   return (
     <div
       style={{
@@ -125,9 +147,7 @@ function Translation({ flag, lang, text }: { flag: string; lang: string; text: s
         background: "#fafafa",
       }}
     >
-      <Label>
-        {flag} {lang}
-      </Label>
+      <Label>{lang}</Label>
       <div style={{ fontSize: 14, color: "#111827" }}>{text}</div>
     </div>
   );

@@ -9,9 +9,11 @@ pipeline the same way.
 
 from __future__ import annotations
 
-from .config import Config, load_config
-from .client import TranslateClient, BedrockClient
-from .service import PipelineService
+from typing import Any
+
+from .config import Config, load_config, load_runtime_settings
+from .client import TranslateClient, BedrockClient, JobStore
+from .service import JobService, PipelineService
 
 
 def build_pipeline(config: Config | None = None) -> PipelineService:
@@ -21,11 +23,19 @@ def build_pipeline(config: Config | None = None) -> PipelineService:
     return PipelineService(translate_client, bedrock_client, cfg)
 
 
-def build_pipeline_with_config(config: Config) -> PipelineService:
-    """Build the pipeline from an already-resolved Config.
+def build_job_service(
+    s3_client: Any, input_bucket: str, output_bucket: str, config: Config | None = None
+) -> JobService:
+    """Wire the job service: S3 store + runtime settings from config.json.
 
-    Used by the Lambda handler after it resolves the Bedrock model id from
-    config.json in the input bucket. Explicit alias so the call site reads
-    clearly; identical wiring to build_pipeline.
+    The settings loader re-reads config.json on every call, so edits in the
+    input bucket apply to the next job without a redeploy.
     """
-    return build_pipeline(config)
+    base = config or load_config()
+    store = JobStore(s3_client, input_bucket, output_bucket)
+    return JobService(
+        store=store,
+        settings_loader=lambda: load_runtime_settings(s3_client, input_bucket, base),
+        pipeline_factory=build_pipeline,
+        base_config=base,
+    )

@@ -22,7 +22,9 @@ class FakeTranslate:
             text=f"[{target_language}] {text}",
             source_language=source_language,
             target_language=target_language,
-            detected_source_language=target_language,
+            # Real Amazon Translate echoes the SOURCE language here, not the
+            # target. Mirroring that keeps this fake honest.
+            detected_source_language=source_language,
         )
 
 
@@ -85,3 +87,12 @@ def test_process_batch_covers_de_and_fr():
     )
     assert len(results) == 4
     assert {r.target_language for r in results} == {"de", "fr"}
+
+
+def test_process_batch_summarizes_each_review_once_for_all_targets():
+    bedrock = FakeBedrock()
+    svc = PipelineService(FakeTranslate(), bedrock, load_config())
+    results = svc.process_batch([_english_review(), _english_review()], ["de", "fr", "es"])
+
+    assert len(results) == 6  # 2 reviews x 3 targets
+    assert bedrock.calls == 2  # one summary per review, not per (review, target)

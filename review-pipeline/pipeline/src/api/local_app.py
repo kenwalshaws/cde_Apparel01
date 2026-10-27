@@ -2,36 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 """Local control plane backing the TypeScript GUI.
 
-api layer: a thin HTTP surface that lets the local GUI drive the *deployed*
-AWS backend. It runs on your machine with your AWS credentials and does three
-things on the GUI's behalf:
+api layer: a thin HTTP surface that lets a locally running GUI drive the
+*deployed* AWS backend. It runs on your machine with your AWS credentials and
+forwards each request to the deployed Lambda:
 
-  - generate : invoke the deployed Lambda with action "generate" (the Lambda
-               builds the synthetic corpus and uploads it to the input bucket)
-  - process  : invoke the deployed Lambda with action "process" (the Lambda
-               runs the translate/summarize/score pipeline, writing results to
-               the output bucket)
-  - results  : read surfaced result files from the output bucket
-  - summary  : read run_summary.json from the output bucket
+  - POST /generate  : Lambda action "generate" (builds the synthetic corpus and
+                      uploads it to the input bucket)
+  - POST /run       : Lambda action "process" (starts an asynchronous job and
+                      returns its jobnum)
+  - GET  /jobs      : Lambda action "jobs" (job ids, newest first)
+  - GET  /job/{id}  : Lambda action "job" (one job's inputs, results, summary)
+  - GET  /health    : the configuration this service is running with
 
-The browser never holds AWS credentials or talks to AWS directly — it only
-calls this local service over /api.
+The browser never holds AWS credentials or talks to AWS directly. AWS error
+details are logged here and are not returned to the browser.
 
 Run (from the `pipeline/` directory, with AWS creds + the stack deployed):
     PIPELINE_FUNCTION=review-pipeline-processor \
-    OUTPUT_BUCKET=review-pipeline-output-<account-id> \
     AWS_REGION=us-east-1 \
-    uvicorn src.api.local_app:app --reload --port 8000
+    uvicorn src.api.local_app:app --reload
 
 Environment variables:
     PIPELINE_FUNCTION  (required)  deployed Lambda function name
-    OUTPUT_BUCKET      (required)  output bucket to read results from
+    OUTPUT_BUCKET      (optional)  shown by /health only
     AWS_REGION         (optional)  defaults to us-east-1
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -42,8 +42,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 _REGION = os.environ.get("AWS_REGION", "us-east-1")
+logger = logging.getLogger("review_pipeline.local_app")
 _lambda = boto3.client("lambda", region_name=_REGION)
-_s3 = boto3.client("s3", region_name=_REGION)
 
 
 def _function_name() -> str:
@@ -54,13 +54,6 @@ def _function_name() -> str:
             detail="PIPELINE_FUNCTION env var is not set (deployed Lambda name).",
         )
     return name
-
-
-def _output_bucket() -> str:
-    bucket = os.environ.get("OUTPUT_BUCKET")
-    if not bucket:
-        raise HTTPException(status_code=500, detail="OUTPUT_BUCKET env var is not set.")
-    return bucket
 
 
 def _invoke_lambda(payload: dict[str, Any]) -> dict[str, Any]:
@@ -79,23 +72,27 @@ def _invoke_lambda(payload: dict[str, Any]) -> dict[str, Any]:
             "Set them in the shell before starting uvicorn.",
         ) from exc
     except ClientError as exc:
+        # Keep the AWS error (it can name the function, region and account)
+        # in this process's log; return only the error code to the browser.
         err = exc.response.get("Error", {})
         code = err.get("Code", "ClientError")
-        message = err.get("Message", str(exc))
+        logger.error("Lambda invoke failed (%s): %s", code, err.get("Message", exc))
         raise HTTPException(
-            status_code=502,
-            detail=f"Lambda invoke failed ({code}) for function '{function}' "
-            f"in region '{_REGION}': {message}",
+            status_code=502, detail=f"pipeline invocation failed ({code}); see the server log"
         ) from exc
     except BotoCoreError as exc:
+        logger.error("AWS SDK error invoking the pipeline: %s", exc)
         raise HTTPException(
-            status_code=502,
-            detail=f"AWS SDK error invoking '{function}' in region '{_REGION}': {exc}",
+            status_code=502, detail="pipeline invocation failed; see the server log"
         ) from exc
 
     raw = resp["Payload"].read()
     if resp.get("FunctionError"):
-        raise HTTPException(status_code=502, detail=f"Lambda error: {raw.decode('utf-8')}")
+        # The payload holds errorMessage and a stack trace: log it, do not return it.
+        logger.error("Lambda function error: %s", raw.decode("utf-8", errors="replace"))
+        raise HTTPException(
+            status_code=502, detail="pipeline function error; see the server log"
+        )
 
     outer = json.loads(raw) if raw else {}
     # The handler returns {"statusCode": ..., "body": "<json string>"}.
@@ -126,7 +123,8 @@ class GenerateRequest(BaseModel):
 
 class ProcessRequest(BaseModel):
     input_key: str = "sample/reviews.json"
-    targets: list[str] = ["fr", "de"]
+    # Not forwarded to the Lambda; targets come from config.json there.
+    targets: list[str] | None = None
 
 
 @app.get("/health")

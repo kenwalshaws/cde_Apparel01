@@ -78,8 +78,8 @@ def main() -> int:
     parser.add_argument("--input", required=True, help="Path to reviews JSON.")
     parser.add_argument(
         "--targets",
-        default="fr,de",
-        help="Comma-separated target language codes (default: fr,de).",
+        default=",".join(load_config().target_languages),
+        help="Comma-separated target language codes (default: the Config default, de,fr).",
     )
     parser.add_argument(
         "--output-dir",
@@ -114,8 +114,9 @@ def main() -> int:
     start = time.time()
     results: list[PipelineResult] = []
     for i, review in enumerate(reviews, start=1):
-        for target in targets:
-            result = pipeline.process_review(review, target)
+        # process_batch summarizes the review once and reuses the summary for
+        # every target (N Bedrock calls, not N x targets).
+        for result in pipeline.process_batch([review], targets):
             results.append(result)
             if result.surfaced:
                 _write_result(out_root, result)
