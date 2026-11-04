@@ -304,21 +304,21 @@
             "CORS_ALLOW_ORIGIN": {
               "Fn::FindInMap": [
                 "Cors",
-                "Default",
+                "Api",
                 "Origin"
               ]
             },
             "CORS_ALLOW_HEADERS": {
               "Fn::FindInMap": [
                 "Cors",
-                "Default",
+                "Api",
                 "Headers"
               ]
             },
             "CORS_ALLOW_METHODS": {
               "Fn::FindInMap": [
                 "Cors",
-                "Default",
+                "Api",
                 "Methods"
               ]
             }
@@ -447,7 +447,7 @@
                       "V": {
                         "Fn::FindInMap": [
                           "Cors",
-                          "Default",
+                          "Api",
                           "Origin"
                         ]
                       }
@@ -461,7 +461,7 @@
                       "V": {
                         "Fn::FindInMap": [
                           "Cors",
-                          "Default",
+                          "Api",
                           "Headers"
                         ]
                       }
@@ -475,7 +475,7 @@
                       "V": {
                         "Fn::FindInMap": [
                           "Cors",
-                          "Default",
+                          "Api",
                           "Methods"
                         ]
                       }
@@ -832,7 +832,7 @@
   },
   "Mappings": {
     "Cors": {
-      "Default": {
+      "Api": {
         "Origin": "*",
         "Headers": "Content-Type,X-Api-Key,Authorization",
         "Methods": "GET,POST,OPTIONS"
