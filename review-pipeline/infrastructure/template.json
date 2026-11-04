@@ -1,6 +1,5 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Transform": "AWS::LanguageExtensions",
   "Description": "Review translate-and-summarize pipeline (proof of concept). Deploys a Lambda that generates synthetic reviews, and translates/summarizes/scores them with Amazon Translate and Amazon Bedrock, writing results to an output bucket. The GUI drives it via explicit Lambda invokes; the S3 object-created trigger is optional and OFF by default.",
   "Parameters": {
     "ProjectName": {
@@ -20,7 +19,11 @@
     "BedrockModelIds": {
       "Type": "CommaDelimitedList",
       "Default": "us.anthropic.claude-haiku-5-5,global.anthropic.claude-haiku-5-5,us.amazon.nova-2-lite-v1:0",
-      "Description": "Allowed Bedrock inference profile IDs (geo.provider.model form, for example us.anthropic.claude-haiku-5-5). The Lambda role may invoke exactly these profiles and their underlying foundation models; the first one is the fallback model. deploy.sh fills this from the models list in infrastructure/config.json, so that file is the single source of truth. Match the geo prefix to your deploy Region."
+      "Description": "Allowed Bedrock inference profile IDs (geo.provider.model form, for example us.anthropic.claude-haiku-5-5). The first one is the fallback model. deploy.sh fills this from the models list in infrastructure/config.json, so that file is the single source of truth."
+    },
+    "BedrockInvokeArns": {
+      "Type": "CommaDelimitedList",
+      "Description": "Exact ARNs the Lambda role may call with bedrock:InvokeModel: each allowed inference profile (deploy Region and account) and its foundation model. deploy.sh builds this list from the models in infrastructure/config.json; do not hand-edit. Foundation-model ARNs use Region \"*\" because cross-Region inference profiles route calls to other Regions."
     },
     "QualityThreshold": {
       "Type": "String",
@@ -227,6 +230,16 @@
                         "Ref": "AWS::Region"
                       }
                     }
+                  }
+                },
+                {
+                  "Sid": "Bedrock",
+                  "Effect": "Allow",
+                  "Action": [
+                    "bedrock:InvokeModel"
+                  ],
+                  "Resource": {
+                    "Ref": "BedrockInvokeArns"
                   }
                 },
                 {
@@ -763,72 +776,7 @@
           "Ref": "ApiUsagePlan"
         }
       }
-    },
-    "Fn::ForEach::BedrockAccess": [
-      "ModelId",
-      {
-        "Ref": "BedrockModelIds"
-      },
-      {
-        "BedrockInvoke&{ModelId}": {
-          "Type": "AWS::IAM::ManagedPolicy",
-          "Properties": {
-            "Description": "Allows bedrock:InvokeModel on one allowed inference profile and its foundation model (generated from the BedrockModelIds parameter).",
-            "Roles": [
-              {
-                "Ref": "PipelineExecutionRole"
-              }
-            ],
-            "PolicyDocument": {
-              "Version": "2012-10-17",
-              "Statement": [
-                {
-                  "Sid": "InvokeProfileAndFoundationModel",
-                  "Effect": "Allow",
-                  "Action": [
-                    "bedrock:InvokeModel"
-                  ],
-                  "Resource": [
-                    {
-                      "Fn::Sub": "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}"
-                    },
-                    {
-                      "Fn::Sub": [
-                        "arn:aws:bedrock:*::foundation-model/${Provider}.${Model}",
-                        {
-                          "Provider": {
-                            "Fn::Select": [
-                              1,
-                              {
-                                "Fn::Split": [
-                                  ".",
-                                  "${ModelId}"
-                                ]
-                              }
-                            ]
-                          },
-                          "Model": {
-                            "Fn::Select": [
-                              2,
-                              {
-                                "Fn::Split": [
-                                  ".",
-                                  "${ModelId}"
-                                ]
-                              }
-                            ]
-                          }
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        }
-      }
-    ]
+    }
   },
   "Outputs": {
     "InputBucketName": {

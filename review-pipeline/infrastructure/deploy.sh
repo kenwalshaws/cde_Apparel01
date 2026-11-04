@@ -91,6 +91,25 @@ ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text ${REGION
 EFFECTIVE_REGION="${REGION:-$(aws configure get region || true)}"
 EFFECTIVE_REGION="${EFFECTIVE_REGION:-us-east-1}"
 
+# Exact Bedrock ARNs for the Lambda role, one inference profile and one
+# foundation model per allowed model. Built here (not in the template) so the
+# template needs no transform and every scanner can read the policy as deployed.
+# Profile ids are geo.provider.model; the foundation model id drops the geo prefix.
+BEDROCK_INVOKE_ARNS="$(python3 - "${BEDROCK_MODEL_IDS}" "${EFFECTIVE_REGION}" "${ACCOUNT_ID}" <<'PYEOF'
+import re, sys
+ids, region, account = sys.argv[1].split(","), sys.argv[2], sys.argv[3]
+arns = []
+for profile in ids:
+    profile = profile.strip()
+    if not re.fullmatch(r"[a-z]+\.[a-z0-9-]+\.[A-Za-z0-9.:-]+", profile):
+        sys.exit(f"invalid Bedrock inference profile id: {profile!r} (expected geo.provider.model)")
+    arns.append(f"arn:aws:bedrock:{region}:{account}:inference-profile/{profile}")
+    arns.append(f"arn:aws:bedrock:*::foundation-model/{profile.split('.', 1)[1]}")
+print(",".join(dict.fromkeys(arns)))  # de-duplicated, order kept
+PYEOF
+)"
+echo "Bedrock ARNs:   ${BEDROCK_INVOKE_ARNS}"
+
 # Default the code bucket to an account-scoped name so a fresh account just works.
 CODE_BUCKET="${CODE_BUCKET:-${PROJECT_NAME}-code-${ACCOUNT_ID}}"
 
@@ -140,12 +159,13 @@ echo "4/4  Deploying CloudFormation stack '${STACK_NAME}' ..."
 aws cloudformation deploy \
   --template-file "${ROOT}/infrastructure/template.json" \
   --stack-name "${STACK_NAME}" \
-  --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+  --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
     ProjectName="${PROJECT_NAME}" \
     LambdaCodeS3Bucket="${CODE_BUCKET}" \
     LambdaCodeS3Key="${CODE_KEY}" \
     BedrockModelIds="${BEDROCK_MODEL_IDS}" \
+    BedrockInvokeArns="${BEDROCK_INVOKE_ARNS}" \
     EnableS3Trigger="${ENABLE_S3_TRIGGER}" \
     ApiAuth="${API_AUTH}" \
   ${REGION_ARG[@]+"${REGION_ARG[@]}"}

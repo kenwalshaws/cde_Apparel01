@@ -60,16 +60,28 @@ Region and account; foundation-model ARNs keep Region `*` because cross-Region
 profiles route requests to other Regions. Translate allows only
 `translate:TranslateText`, restricted by `aws:RequestedRegion`.
 **Why:** least privilege that still works with cross-Region profiles.
-**How it is built:** `BedrockModelIds` is one template parameter that
-`deploy.sh` fills from the `models` list in `infrastructure/config.json`. A
-`Fn::ForEach` loop (AWS::LanguageExtensions transform, which is why the deploy
-uses `CAPABILITY_AUTO_EXPAND`) creates one managed policy per profile, granting
-the profile ARN and its foundation model (the profile id without the geo
-prefix). Adding a model means editing `config.json` and redeploying.
-**Known limit:** Translate has no resource-level permissions, so its resource
-is `*`. This is the one remaining HIGH scanner finding.
-**Not verified against live AWS:** the ARN patterns were checked locally with
-pattern matching and by a successful deployment and run.
+**How it is built:** `deploy.sh` reads the `models` list in
+`infrastructure/config.json` and builds the exact ARN list (each inference
+profile in the deploy Region and account, plus its foundation model: the
+profile id without the geo prefix). It passes that list as the
+`BedrockInvokeArns` parameter, which is the `Resource` of one plain `Bedrock`
+statement in the role's inline policy. Adding a model means editing
+`config.json` and redeploying.
+**Rejected:** generating one policy per model with `Fn::ForEach`
+(AWS::LanguageExtensions). CloudFormation accepted it, but cfn-nag crashed on
+the untransformed template and the IAM scanners could not see the generated
+policies, so a clean scan would not have meant a reviewed policy.
+**Known limits (accepted HIGH findings):** Translate has no resource-level
+permissions, so its resource is `*` (one action, deploy Region only). The
+foundation-model ARNs keep Region `*`; pinning them to the deploy Region breaks
+cross-Region inference profiles.
+**Also accepted (MEDIUM):** `s3:ListBucket` on the output bucket has no
+`s3:prefix` condition. The role needs ListBucket so a missing job file returns
+404 (`NoSuchKey`, handled as "not ready yet") rather than 403; a prefix
+condition would not apply to those GetObject calls. The grant covers only the
+one output bucket.
+**Verified:** the same ARN set was deployed and run successfully before the
+`Fn::ForEach` change; this version restores it. Not yet re-deployed.
 
 ## 7. English source only
 
