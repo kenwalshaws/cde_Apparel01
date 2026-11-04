@@ -87,6 +87,19 @@ built-in default (`de`, `fr`) in `pipeline/src/config.py` is only a fallback.
 
 ## Git workflow
 
-GitHub Flow: branch from `main`, small focused PRs, fill in the PR template,
-squash or merge after review. Check `git branch --show-current` before
-branching.
+Git Flow. Check `git branch --show-current` before branching, and never
+commit directly to `main` or `develop`.
+
+| Branch | Purpose | Branch from | Merges into |
+|---|---|---|---|
+| `main` | Released code only; every merge is tagged (`vX.Y.Z`) | — | — |
+| `develop` | Integration of finished features | `main` | — |
+| `feature/<name>` | One focused change | `develop` | `develop` |
+| `release/<X.Y.Z>` | Release preparation (version bumps, final fixes) | `develop` | `main`, then back into `develop` |
+| `hotfix/<X.Y.Z>` | Urgent fix to a release | `main` | `main`, then back into `develop` |
+
+- Open a pull request for every merge and fill in the PR template.
+- Merge with a merge commit (no squash), so feature and release history stays
+  visible.
+- After a release or hotfix merges to `main`, tag it on `main` and merge
+  `main` back into `develop`.

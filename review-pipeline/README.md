@@ -515,10 +515,11 @@ knowing:
   inference profiles route to other Regions. **To enable another model, add its
   inference profile ID (geo.provider.model form, for example
   `us.anthropic.claude-haiku-5-5`) to the `models` list in
-  `infrastructure/config.json` and re-run `deploy.sh`.** The deploy copies that
-  list into the template's `BedrockModelIds` parameter, and a loop in
-  `infrastructure/template.json` creates one IAM policy per listed profile (and
-  its foundation model). Do not edit the generated policies by hand. Editing
+  `infrastructure/config.json` and re-run `deploy.sh`.** The deploy builds the
+  exact ARN list from that file (the profile in your Region and account, and its
+  foundation model) and passes it as the template's `BedrockInvokeArns`
+  parameter, which is the `Resource` of the role's single `Bedrock` statement.
+  Do not edit that parameter by hand. Editing
   `config.json` in S3 without redeploying lets you select a listed model, but a
   model that was never deployed fails with an access-denied error by design.
 - **Translate uses `Resource: "*"` with a Region condition.** Amazon Translate
